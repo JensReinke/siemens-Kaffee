@@ -55,6 +55,35 @@ ALARM_WOERTER = re.compile(
     r"alarm|scharf|sicherheit|security|secur|h[üu]llschutz|vollschutz|einbruch|intrusion",
     re.IGNORECASE,
 )
+# … aber Rauch-/Wassermelder, Batteriewarnungen und Meldungszähler melden nie,
+# ob die Anlage scharf ist.
+ALARM_RAUSCHEN = re.compile(r"rauch|smoke|batter|wasser|water|leck|leak|meldungen|messages", re.IGNORECASE)
+# Besonders wahrscheinliche Treffer stehen in der Auswahl oben.
+ALARM_STARK = re.compile(
+    r"scharf|h[üu]llschutz|vollschutz|alarmanlage|alarmzentrale|alarmmodus|alarm_mode|security_system",
+    re.IGNORECASE,
+)
+
+# Alle Entitäten aus dem Register von Home Assistant – auch deaktivierte, die
+# keinen Zustand haben. Homematic(IP) Local legt Systemvariablen der CCU so an.
+# Der Weg führt über die Titel der Konfigurationseinträge, weil
+# integration_entities() nur dafür auch deaktivierte Entitäten liefert.
+REGISTER_TEMPLATE = """
+{%- set ns = namespace(eintraege=[]) -%}
+{%- for zustand in states -%}
+  {%- set geraet = device_id(zustand.entity_id) -%}
+  {%- if geraet -%}
+    {%- for eintrag in device_attr(geraet, 'config_entries') or [] -%}
+      {%- set ns.eintraege = ns.eintraege + [eintrag] -%}
+    {%- endfor -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- set ns2 = namespace(ids=[]) -%}
+{%- for eintrag in ns.eintraege | unique -%}
+  {%- set ns2.ids = ns2.ids + (integration_entities(config_entry_attr(eintrag, 'title')) | list) -%}
+{%- endfor -%}
+{{ ns2.ids | unique | list | to_json }}
+"""
 
 # Woran man den „Einschalter“ (englisch „Power“) eines Home-Connect-Geräts
 # und eine Kaffeemaschine erkennt – an Entitäts-IDs, Namen und Modell.
@@ -87,17 +116,22 @@ class Abbruch(Exception):
 
 
 def automation_config(
-    alarmanlage: str,
+    alarmanlage: "str | list[str]",
     kaffeemaschine: str,
     von: str,
     bis: str,
     unscharf: str = STANDARD_UNSCHARF,
 ) -> dict[str, Any]:
-    """Dieselbe Automation wie beispiele/automation_ohne_blueprint.yaml."""
+    """Dieselbe Automation wie beispiele/automation_ohne_blueprint.yaml.
+
+    ``alarmanlage`` darf auch eine Liste sein, z. B. je eine Systemvariable für
+    Hüllschutz und Vollschutz – das Unscharfschalten jeder davon zählt.
+    """
+    anlagen = [alarmanlage] if isinstance(alarmanlage, str) else list(alarmanlage)
     # Nicht reagieren, wenn die Alarmanlage nach einem Neustart wieder erreichbar
     # wird oder (bei einer Alarmzentrale) ein Scharfschalten abgebrochen wurde.
     nicht_von = ["unavailable", "unknown"]
-    if alarmanlage.startswith("alarm_control_panel."):
+    if any(anlage.startswith("alarm_control_panel.") for anlage in anlagen):
         nicht_von.append("arming")
     return {
         "alias": ALIAS,
@@ -110,7 +144,7 @@ def automation_config(
         "triggers": [
             {
                 "trigger": "state",
-                "entity_id": alarmanlage,
+                "entity_id": anlagen[0] if len(anlagen) == 1 else anlagen,
                 "to": unscharf,
                 "not_from": nicht_von,
             }
@@ -357,6 +391,18 @@ def kandidaten_kaffeemaschine(
     return kandidaten
 
 
+def alarm_treffer(entity_id: str, name: str = "") -> int:
+    """0 = kommt nicht infrage, 1 = klingt nach Alarm, 2 = klingt nach Scharf-/Unscharf-Zustand."""
+    text = f"{entity_id} {name}"
+    if (
+        entity_id.split(".", 1)[0] not in ALARM_DOMAINS
+        or not ALARM_WOERTER.search(text)
+        or ALARM_RAUSCHEN.search(text)
+    ):
+        return 0
+    return 2 if ALARM_STARK.search(text) else 1
+
+
 def kandidaten_alarmanlage(zustaende: dict[str, dict[str, Any]]) -> list[tuple[str, str]]:
     """Alarmzentralen – oder, wenn es keine gibt, Entitäten, die nach Alarmanlage klingen."""
     zentralen = [
@@ -366,16 +412,54 @@ def kandidaten_alarmanlage(zustaende: dict[str, dict[str, Any]]) -> list[tuple[s
     ]
     if zentralen:
         return zentralen
+    treffer = sorted(
+        zustaende.items(),
+        key=lambda paar: (-alarm_treffer(paar[0], name_von(paar[1])), paar[0]),
+    )
     return [
         (entity_id, f"„{name_von(zustand)}“, Zustand: {zustand['state']}")
-        for entity_id, zustand in sorted(zustaende.items())
-        if entity_id.split(".", 1)[0] in ALARM_DOMAINS
-        and (ALARM_WOERTER.search(entity_id) or ALARM_WOERTER.search(name_von(zustand)))
+        for entity_id, zustand in treffer
+        if alarm_treffer(entity_id, name_von(zustand))
     ]
 
 
+def deaktivierte_alarm_entitaeten(
+    ha: HomeAssistant, zustaende: dict[str, dict[str, Any]]
+) -> list[str]:
+    """Entitäten, die nach Alarmanlage klingen, aber keinen Zustand haben.
+
+    Das sind deaktivierte Entitäten – Homematic(IP) Local legt Systemvariablen
+    der CCU standardmäßig so an – oder solche einer gerade nicht geladenen
+    Integration. Auswählen kann man sie erst, wenn sie aktiv sind.
+    """
+    status, text = ha.anfrage("POST", "/api/template", json_daten={"template": REGISTER_TEMPLATE})
+    if status >= 400:
+        return []  # z. B. ältere Home-Assistant-Version ohne config_entry_attr
+    try:
+        entity_ids = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    return sorted(
+        entity_id
+        for entity_id in set(entity_ids)
+        if entity_id not in zustaende and alarm_treffer(entity_id)
+    )
+
+
+def hinweis_deaktiviert(entity_ids: list[str]) -> str:
+    liste = "\n".join(f"    {entity_id}" for entity_id in entity_ids)
+    return (
+        "Diese Entitäten gibt es in Home Assistant, sie sind aber deaktiviert und "
+        f"deshalb nicht auswählbar:\n{liste}\n"
+        "  Aktivieren: Einstellungen → Geräte & Dienste → Entitäten → Filter "
+        "„Deaktivierte Entitäten anzeigen“ → Entität öffnen → Zahnrad → „Aktiviert“ "
+        "einschalten. Bei Homematic(IP) Local geht es auch mit „hahm“ in der "
+        "Beschreibung der Systemvariable in der CCU. Danach dieses Skript erneut ausführen."
+    )
+
+
 def unscharf_bestimmen(
-    alarmanlage: str,
+    alarmanlagen: list[str],
     zustaende: dict[str, dict[str, Any]],
     vorgabe: Optional[str],
     interaktiv: bool,
@@ -383,12 +467,15 @@ def unscharf_bestimmen(
     """Welcher Zustand der Alarmanlage „unscharf“ bedeutet.
 
     Bei einer Alarmzentrale ist das ``disarmed``; bei allem anderen (z. B. einer
-    Systemvariable der CCU) muss es angegeben oder erfragt werden.
+    Systemvariable der CCU) muss es angegeben oder erfragt werden. Bei mehreren
+    Entitäten gilt derselbe Zustand für alle.
     """
     if vorgabe:
         return vorgabe
-    if alarmanlage.startswith("alarm_control_panel."):
+    andere = [a for a in alarmanlagen if not a.startswith("alarm_control_panel.")]
+    if not andere:
         return STANDARD_UNSCHARF
+    alarmanlage = andere[0]
     zustand = zustaende[alarmanlage]
     aktuell = str(zustand["state"])
     optionen = zustand.get("attributes", {}).get("options")
@@ -402,21 +489,30 @@ def unscharf_bestimmen(
         moeglich = f", möglich: {', '.join(map(str, optionen))}" if optionen else ""
         raise Abbruch(f"{frage}{moeglich}.\n  Bitte mit --unscharf <Zustand> angeben.")
     if optionen:
-        return str(optionen[menue(frage, [str(o) for o in optionen])])
+        [gewaehlt] = menue(frage, [str(o) for o in optionen])
+        return str(optionen[gewaehlt])
     print(f"\n{frage}")
     antwort = input(f"Zustand für „unscharf“ [{aktuell}]: ").strip()
     return antwort or aktuell
 
 
-def menue(frage: str, eintraege: list[str]) -> int:
-    """Lässt den Benutzer einen Eintrag wählen und gibt dessen Index zurück."""
+def menue(frage: str, eintraege: list[str], mehrere: bool = False) -> list[int]:
+    """Lässt den Benutzer Einträge wählen und gibt deren Indizes zurück.
+
+    Mit ``mehrere`` dürfen es mehrere Nummern sein, durch Komma getrennt.
+    """
     print(f"\n{frage}")
     for nr, eintrag in enumerate(eintraege, 1):
         print(f"  {nr}) {eintrag}")
+    aufforderung = f"Nummer{'n, durch Komma getrennt,' if mehrere else ''} [1-{len(eintraege)}]: "
     while True:
-        antwort = input(f"Nummer [1-{len(eintraege)}]: ").strip()
-        if antwort.isdigit() and 1 <= int(antwort) <= len(eintraege):
-            return int(antwort) - 1
+        nummern = [teil.strip() for teil in input(aufforderung).replace(";", ",").split(",")]
+        if (
+            nummern
+            and all(nummer.isdigit() and 1 <= int(nummer) <= len(eintraege) for nummer in nummern)
+            and (mehrere or len(nummern) == 1)
+        ):
+            return sorted({int(nummer) - 1 for nummer in nummern})
 
 
 def auswaehlen(
@@ -426,20 +522,22 @@ def auswaehlen(
     option: str,
     interaktiv: bool,
     hinweis: str = "",
-) -> str:
-    """Wählt einen Kandidaten – automatisch, per Rückfrage oder gar nicht.
+    mehrere: bool = False,
+) -> list[str]:
+    """Wählt Kandidaten – automatisch, per Rückfrage oder gar nicht.
 
     ``fehlt`` („Keine Alarmanlage“) und ``fuer`` („die Alarmanlage“) sind die
     Formen für die Meldungen „… in Home Assistant gefunden“ bzw.
-    „Mehrere Möglichkeiten für …“.
+    „Mehrere Möglichkeiten für …“. Mit ``mehrere`` dürfen mehrere gewählt werden.
     """
+    mehrfach = " (mehrfach möglich)" if mehrere else ""
     if not kandidaten:
         raise Abbruch(
             f"{fehlt} in Home Assistant gefunden. {hinweis}".strip()
-            + f"\n  Die Entitäts-ID lässt sich auch direkt angeben: {option} <entity_id>"
+            + f"\n  Die Entitäts-ID lässt sich auch direkt angeben: {option} <entity_id>{mehrfach}"
         )
     if len(kandidaten) == 1:
-        return kandidaten[0][0]
+        return [kandidaten[0][0]]
     liste = "\n".join(
         f"  {nr}) {entity_id}  {beschreibung}"
         for nr, (entity_id, beschreibung) in enumerate(kandidaten, 1)
@@ -447,13 +545,18 @@ def auswaehlen(
     if not interaktiv:
         raise Abbruch(
             f"Mehrere Möglichkeiten für {fuer} gefunden:\n{liste}\n"
-            f"  Bitte mit {option} <entity_id> angeben, welche gemeint ist."
+            f"  Bitte mit {option} <entity_id> angeben, welche gemeint ist{mehrfach}."
+            + (f"\n  {hinweis}" if hinweis else "")
         )
+    if hinweis:
+        print(f"\n{hinweis}")
     gewaehlt = menue(
-        f"Mehrere Möglichkeiten für {fuer} gefunden – welche ist gemeint?",
+        f"Mehrere Möglichkeiten für {fuer} gefunden – welche "
+        + ("sind gemeint? (mehrere möglich)" if mehrere else "ist gemeint?"),
         [f"{entity_id}  {beschreibung}" for entity_id, beschreibung in kandidaten],
+        mehrere,
     )
-    return kandidaten[gewaehlt][0]
+    return [kandidaten[index][0] for index in gewaehlt]
 
 
 def entitaet_pruefen(
@@ -552,7 +655,12 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--alarmanlage",
-        help="Entitäts-ID der Alarmanlage, falls sie nicht automatisch gefunden wird",
+        action="append",
+        metavar="ENTITY_ID",
+        help=(
+            "Entitäts-ID der Alarmanlage, falls sie nicht automatisch gefunden wird; "
+            "mehrfach möglich, z. B. je eine Systemvariable für Hüllschutz und Vollschutz"
+        ),
     )
     parser.add_argument(
         "--unscharf",
@@ -630,24 +738,40 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
 
     zustaende = {z["entity_id"]: z for z in ha.get_json("/api/states")}
     if args.alarmanlage:
-        alarmanlage = entitaet_pruefen(args.alarmanlage, ALARM_DOMAINS, zustaende, "--alarmanlage")
+        alarmanlagen = [
+            entitaet_pruefen(anlage, ALARM_DOMAINS, zustaende, "--alarmanlage")
+            for anlage in args.alarmanlage
+        ]
     else:
-        alarmanlage = auswaehlen(
-            kandidaten_alarmanlage(zustaende),
+        kandidaten = kandidaten_alarmanlage(zustaende)
+        hinweis = (
+            "Ist die Alarmanlage in Home Assistant eingebunden – als Alarmzentrale "
+            "(alarm_control_panel) oder z. B. als Systemvariable der CCU (Sensor, Auswahl, Schalter)?"
+        )
+        if not any(entity_id.startswith("alarm_control_panel.") for entity_id, _ in kandidaten):
+            deaktiviert = deaktivierte_alarm_entitaeten(ha, zustaende)
+            if deaktiviert:
+                hinweis = hinweis_deaktiviert(deaktiviert)
+        alarmanlagen = auswaehlen(
+            kandidaten,
             "Keine Alarmanlage",
             "die Alarmanlage",
             "--alarmanlage",
             interaktiv,
-            "Ist die Alarmanlage in Home Assistant eingebunden – als Alarmzentrale "
-            "(alarm_control_panel) oder z. B. als Systemvariable der CCU (Sensor, Auswahl, Schalter)?",
+            hinweis,
+            mehrere=True,
         )
-    unscharf = unscharf_bestimmen(alarmanlage, zustaende, args.unscharf, interaktiv)
-    print(f"✓ Alarmanlage: {alarmanlage} („{name_von(zustaende[alarmanlage])}“), unscharf = „{unscharf}“")
+    unscharf = unscharf_bestimmen(alarmanlagen, zustaende, args.unscharf, interaktiv)
+    print(
+        "✓ Alarmanlage: "
+        + ", ".join(f"{anlage} („{name_von(zustaende[anlage])}“)" for anlage in alarmanlagen)
+        + f", unscharf = „{unscharf}“"
+    )
 
     if args.kaffeemaschine:
         kaffeemaschine = entitaet_pruefen(args.kaffeemaschine, ("switch",), zustaende, "--kaffeemaschine")
     else:
-        kaffeemaschine = auswaehlen(
+        [kaffeemaschine] = auswaehlen(
             kandidaten_kaffeemaschine(ha, zustaende),
             "Kein Einschalter der Kaffeemaschine",
             "den Einschalter der Kaffeemaschine",
@@ -657,7 +781,7 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
         )
     print(f"✓ Kaffeemaschine: {kaffeemaschine} („{name_von(zustaende[kaffeemaschine])}“)")
 
-    config = automation_config(alarmanlage, kaffeemaschine, args.von, args.bis, unscharf)
+    config = automation_config(alarmanlagen, kaffeemaschine, args.von, args.bis, unscharf)
     if args.nur_anzeigen:
         print("\nDiese Automation würde eingerichtet (nichts geändert):")
         print(json.dumps(config, indent=2, ensure_ascii=False))

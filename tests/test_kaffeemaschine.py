@@ -296,6 +296,31 @@ async def test_blueprint_mit_systemvariable_statt_alarmzentrale(
     assert_eingeschaltet(einschalten, 1)
 
 
+async def test_blueprint_mit_zwei_systemvariablen(
+    hass: HomeAssistant,
+    tmp_path: Path,
+    freezer: FrozenDateTimeFactory,
+    einschalten: list[ServiceCall],
+) -> None:
+    """Hüllschutz und Vollschutz als zwei Variablen: das Unscharfschalten jeder zählt."""
+    intern = "binary_sensor.raspberrymatic_alarm_intern_scharf"
+    extern = "binary_sensor.raspberrymatic_alarm_extern_scharf"
+    # Die Variablen gibt es schon, bevor die Automation aktiv wird – wie nach
+    # einem Start von Home Assistant, der Automationen erst zum Schluss aktiviert.
+    hass.states.async_set(intern, "off")
+    hass.states.async_set(extern, "off")
+    await blueprint_einrichten(hass, tmp_path, alarmanlage=[intern, extern], unscharf="off")
+    hass.states.async_set(KAFFEEMASCHINE, "off")
+
+    freezer.move_to(um("23:00:00", "2026-10-04"))
+    hass.states.async_set(extern, "on")
+    await hass.async_block_till_done()
+    freezer.move_to(um("06:30:00"))
+    hass.states.async_set(extern, "off")
+    await hass.async_block_till_done()
+    assert_eingeschaltet(einschalten)
+
+
 # --- Einstellungen, die nur der Blueprint bietet -----------------------------
 
 
