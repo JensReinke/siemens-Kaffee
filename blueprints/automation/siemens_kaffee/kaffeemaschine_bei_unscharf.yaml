@@ -21,11 +21,31 @@ blueprint:
   input:
     alarmanlage:
       name: Alarmanlage
-      description: Die Alarmzentrale, deren Unscharfschalten die Kaffeemaschine einschalten soll.
+      description: >-
+        Die Alarmzentrale, deren Unscharfschalten die Kaffeemaschine einschalten
+        soll – oder eine andere Entität, die den Zustand der Alarmanlage meldet,
+        z. B. eine Systemvariable der Homematic-CCU (OpenCCU). Dann unten den
+        Zustand „unscharf“ anpassen.
       selector:
         entity:
           filter:
-            - domain: alarm_control_panel
+            - domain:
+                - alarm_control_panel
+                - sensor
+                - binary_sensor
+                - select
+                - input_select
+                - input_boolean
+                - switch
+    unscharf:
+      name: Zustand „unscharf“
+      description: >-
+        Der Zustand, den die Alarmanlage beim Unscharfschalten annimmt. Bei einer
+        Alarmzentrale `disarmed`; bei einer Systemvariable z. B. `Unscharf` oder
+        `off`.
+      default: disarmed
+      selector:
+        text: {}
     kaffeemaschine:
       name: Kaffeemaschine
       description: >-
@@ -106,7 +126,7 @@ max_exceeded: silent
 triggers:
   - trigger: state
     entity_id: !input alarmanlage
-    to: disarmed
+    to: !input unscharf
     # Nicht reagieren, wenn die Alarmanlage nach einem Neustart wieder
     # erreichbar wird oder ein Scharfschaltvorgang abgebrochen wurde.
     not_from:

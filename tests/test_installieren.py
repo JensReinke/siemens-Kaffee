@@ -6,6 +6,7 @@ dagegen laufen – mit Token und mit Benutzername/Passwort.
 """
 
 import os
+import sys
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import datetime
 from functools import partial
@@ -508,7 +509,7 @@ async def test_keine_kaffeemaschine(
     [
         ("--kaffeemaschine", "switch.gibt_es_nicht", "gibt es in Home Assistant nicht"),
         ("--kaffeemaschine", "light.kuche", "aus dem Bereich „switch“"),
-        ("--alarmanlage", "switch.kaffeevollautomat_einschalter", "aus dem Bereich „alarm_control_panel“"),
+        ("--alarmanlage", "light.kuche", "aus dem Bereich „alarm_control_panel“, „sensor“"),
     ],
 )
 async def test_angegebene_entitaet_wird_geprueft(
@@ -524,6 +525,128 @@ async def test_angegebene_entitaet_wird_geprueft(
     assert code == 1
     assert meldung in fehler
     assert gespeicherte_automationen(home_assistant) == []
+
+
+# --- Alarmanlage ohne Alarmzentrale, z. B. Systemvariable der Homematic-CCU ---
+
+SYSTEMVARIABLE = "sensor.openccu_alarmanlage"
+
+
+@pytest.fixture
+async def openccu(home_assistant: HomeAssistant) -> None:
+    """Keine Alarmzentrale – eine CCU-Systemvariable meldet den Zustand der Anlage."""
+    home_assistant.states.async_remove(ALARMANLAGE)
+    home_assistant.states.async_set(SYSTEMVARIABLE, "Vollschutz", {"friendly_name": "OpenCCU Alarmanlage"})
+    home_assistant.states.async_set("sensor.openccu_temperatur", "21.5", {"friendly_name": "OpenCCU Temperatur"})
+
+
+@pytest.mark.usefixtures("kaffeemaschine", "openccu")
+async def test_systemvariable_als_alarmanlage(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    freezer: FrozenDateTimeFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Das Skript findet die Systemvariable, braucht aber den Zustand „unscharf“ – dann klappt alles."""
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 1
+    assert "„OpenCCU Alarmanlage“ ist keine Alarmzentrale" in fehler
+    assert "Aktuell: „Vollschutz“" in fehler and "--unscharf <Zustand>" in fehler
+    assert gespeicherte_automationen(home_assistant) == []
+
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--unscharf", "Unscharf"
+    )
+    assert code == 0, fehler
+    assert f"✓ Alarmanlage: {SYSTEMVARIABLE} („OpenCCU Alarmanlage“), unscharf = „Unscharf“" in ausgabe
+    [automation] = gespeicherte_automationen(home_assistant)
+    assert automation["triggers"] == [
+        {
+            "trigger": "state",
+            "entity_id": SYSTEMVARIABLE,
+            "to": "Unscharf",
+            "not_from": ["unavailable", "unknown"],
+        }
+    ]
+
+    # Vollschutz → Unscharf um 06:30 schaltet die Kaffeemaschine ein …
+    freezer.move_to(um("23:00:00", "2026-10-04"))
+    home_assistant.states.async_set(SYSTEMVARIABLE, "Vollschutz")
+    freezer.move_to(um("06:30:00"))
+    home_assistant.states.async_set(SYSTEMVARIABLE, "Unscharf")
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
+
+    # … ein Neustart der CCU-Anbindung (nicht erreichbar → Unscharf) aber nicht.
+    await home_assistant.services.async_call(
+        "switch", "turn_off", {"entity_id": KAFFEEMASCHINE}, blocking=True
+    )
+    home_assistant.states.async_set(SYSTEMVARIABLE, "unavailable")
+    await home_assistant.async_block_till_done()
+    freezer.move_to(um("06:40:00"))
+    home_assistant.states.async_set(SYSTEMVARIABLE, "Unscharf")
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"
+
+
+@pytest.mark.usefixtures("kaffeemaschine", "openccu")
+async def test_rueckfragen_im_terminal(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Im Terminal fragt das Skript, welche Entität die Alarmanlage ist und welcher Zustand „unscharf“."""
+    home_assistant.states.async_set(
+        "binary_sensor.openccu_alarmzone_1", "off", {"friendly_name": "OpenCCU Alarmzone 1"}
+    )
+    home_assistant.states.async_set(SYSTEMVARIABLE, "Unscharf", {"friendly_name": "OpenCCU Alarmanlage"})
+    # Antworten: Nr. 2 aus der Liste, dann Enter für den vorgeschlagenen aktuellen Zustand.
+    with (
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=["2", ""]),
+    ):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert "1) binary_sensor.openccu_alarmzone_1" in ausgabe
+    assert f"2) {SYSTEMVARIABLE}" in ausgabe
+    assert "Welcher Zustand bedeutet „unscharf“? Aktuell: „Unscharf“" in ausgabe
+    assert f"✓ Alarmanlage: {SYSTEMVARIABLE} („OpenCCU Alarmanlage“), unscharf = „Unscharf“" in ausgabe
+    [automation] = gespeicherte_automationen(home_assistant)
+    assert automation["triggers"][0]["to"] == "Unscharf"
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+@pytest.mark.parametrize(
+    ("entity_id", "zustand", "attribute", "moeglich"),
+    [
+        (
+            "select.openccu_alarmmodus",
+            "Vollschutz",
+            {"options": ["Unscharf", "Hüllschutz", "Vollschutz"]},
+            "Unscharf, Hüllschutz, Vollschutz",
+        ),
+        ("binary_sensor.openccu_alarm_scharf", "on", {}, "off, on"),
+        ("switch.openccu_alarm_scharf", "on", {}, "off, on"),
+    ],
+)
+async def test_moegliche_zustaende_werden_genannt(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+    entity_id: str,
+    zustand: str,
+    attribute: dict[str, Any],
+    moeglich: str,
+) -> None:
+    home_assistant.states.async_remove(ALARMANLAGE)
+    home_assistant.states.async_set(entity_id, zustand, {"friendly_name": "Alarm", **attribute})
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 1
+    assert f"Aktuell: „{zustand}“, möglich: {moeglich}." in fehler
+    assert "--unscharf" in fehler
 
 
 # --- Kleinkram ---------------------------------------------------------------

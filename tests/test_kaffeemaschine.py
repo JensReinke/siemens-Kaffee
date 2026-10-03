@@ -265,6 +265,37 @@ async def test_jedes_unscharfschalten_im_zeitfenster_zaehlt(
     assert_eingeschaltet(einschalten, 2)
 
 
+# --- Blueprint: Alarmanlage ohne Alarmzentrale --------------------------------
+
+
+async def test_blueprint_mit_systemvariable_statt_alarmzentrale(
+    hass: HomeAssistant,
+    tmp_path: Path,
+    freezer: FrozenDateTimeFactory,
+    einschalten: list[ServiceCall],
+) -> None:
+    """Statt einer Alarmzentrale kann z. B. eine Systemvariable der Homematic-CCU die Anlage melden."""
+    systemvariable = "sensor.openccu_alarmanlage"
+    await blueprint_einrichten(hass, tmp_path, alarmanlage=systemvariable, unscharf="Unscharf")
+    hass.states.async_set(KAFFEEMASCHINE, "off")
+
+    freezer.move_to(um("23:00:00", "2026-10-04"))
+    hass.states.async_set(systemvariable, "Vollschutz")
+    await hass.async_block_till_done()
+    freezer.move_to(um("06:30:00"))
+    hass.states.async_set(systemvariable, "Unscharf")
+    await hass.async_block_till_done()
+    assert_eingeschaltet(einschalten)
+
+    # Meldet sich die Variable nach einem Neustart der CCU-Anbindung zurück: nichts.
+    hass.states.async_set(systemvariable, "unavailable")
+    await hass.async_block_till_done()
+    freezer.move_to(um("06:40:00"))
+    hass.states.async_set(systemvariable, "Unscharf")
+    await hass.async_block_till_done()
+    assert_eingeschaltet(einschalten, 1)
+
+
 # --- Einstellungen, die nur der Blueprint bietet -----------------------------
 
 
@@ -366,6 +397,7 @@ def test_blueprint_ist_gueltig() -> None:
     assert blueprint.validate() is None
     assert set(blueprint.inputs) == {
         "alarmanlage",
+        "unscharf",
         "kaffeemaschine",
         "zeit_von",
         "zeit_bis",
