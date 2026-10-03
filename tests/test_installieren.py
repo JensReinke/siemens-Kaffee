@@ -567,7 +567,7 @@ async def test_keine_kaffeemaschine(
     assert "Keine den Einschalter" not in fehler  # Grammatik stimmt
     assert "Kein Einschalter der Kaffeemaschine in Home Assistant gefunden" in fehler
     assert "Die Integration „Home Connect“ ist in Home Assistant nicht eingerichtet" in fehler
-    assert installieren.HOME_CONNECT_ANLEITUNG in fehler
+    assert "normalerweise" in fehler and installieren.HOME_CONNECT_ANLEITUNG in fehler
     assert "--kaffeemaschine <entity_id>" in fehler
 
 
@@ -1107,6 +1107,39 @@ async def test_ueberspringen_der_aktivierung(
 
 
 # --- Kleinkram ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sensor.projekt_nas_volume_1_durchschnittliche_festplattentemperatur",  # „latte“
+        "sensor.hm_wds30_ot2_sm_2_ueq1925063_temperatur_ch1",  # „eq19…“
+        "HM-WDS100-C6-O_MEQ0655167",
+        "switch.steckdose_flur",
+        "sensor.milkyway_helligkeit",
+    ],
+)
+def test_keine_kaffeemaschine_erkannt(text: str) -> None:
+    """Zufällige Buchstabenfolgen wie „Festplatte“ oder Seriennummern sind keine Kaffeemaschine."""
+    assert not installieren.KAFFEEMASCHINE.search(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Kaffeevollautomat",
+        "switch.kaffeemaschine_power",
+        "sensor.kueche_coffee_counter",
+        "binary_sensor.buro_bean_container_empty",
+        "Bohnenbehälter leer",
+        "EQ.9 plus",
+        "switch.eq9_power",
+        "sensor.latte_macchiato_counter",
+        "Milchbehälter",
+    ],
+)
+def test_kaffeemaschine_erkannt(text: str) -> None:
+    assert installieren.KAFFEEMASCHINE.search(text)
 
 
 def test_gleiche_automation_wie_die_yaml_variante() -> None:

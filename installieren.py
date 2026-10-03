@@ -75,9 +75,12 @@ ALARM_STARK = re.compile(
 # Woran man den „Einschalter“ (englisch „Power“) eines Home-Connect-Geräts
 # und eine Kaffeemaschine erkennt – an Entitäts-IDs, Namen und Modell.
 EINSCHALTER = re.compile(r"(^|[_ ])(power|power_?state|einschalter)$", re.IGNORECASE)
+# Die Wörter müssen am Wortanfang stehen (in Entitäts-IDs trennen Unterstriche),
+# sonst passt „Festplatte“ zu „latte“ oder die Seriennummer „UEQ19…“ zur EQ-Serie.
 KAFFEEMASCHINE = re.compile(
-    r"kaffee|coffee|espresso|cappuccino|latte|bean|bohne|milk|milch|drip_tray"
-    r"|tropfschale|hot_water|heisswasser|heißwasser|vollautomat|\beq\b|eq[._ ]?\d",
+    r"(?<![a-z])(kaffee|coffee|espresso|cappuccino|latte(?![a-z])|beans?(?![a-z])|bohne"
+    r"|milk(?![a-z])|milch|drip_tray|tropfschale|hot_water|heisswasser|heißwasser|vollautomat"
+    r"|eq[._ ]?\d)",
     re.IGNORECASE,
 )
 
@@ -400,7 +403,8 @@ def diagnose(register: "Register", zustaende: dict[str, dict[str, Any]]) -> str:
     if not eintraege:
         zeilen.append(
             "Die Integration „Home Connect“ ist in Home Assistant nicht eingerichtet – darüber "
-            "muss die Kaffeemaschine verbunden sein. Anleitung: " + HOME_CONNECT_ANLEITUNG
+            "kommt eine Siemens-Kaffeemaschine normalerweise nach Home Assistant. Anleitung: "
+            + HOME_CONNECT_ANLEITUNG
         )
     for eintrag in eintraege:
         zustand = str(eintrag.get("state"))
