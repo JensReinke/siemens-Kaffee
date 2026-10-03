@@ -26,9 +26,9 @@ Benachrichtigung aufs Handy) ergänzen.
 - Home Assistant 2024.10 oder neuer.
 - Die Kaffeemaschine ist über die Integration
   [Home Connect](https://www.home-assistant.io/integrations/home_connect/)
-  eingebunden. Dort hat sie einen Schalter **„Einschalter“** (englisch
-  „Power“), z. B. `switch.kaffeevollautomat_einschalter` oder
-  `switch.kaffeevollautomat_power`.
+  eingebunden (Anleitung: [Home Connect einrichten](#home-connect-einrichten)).
+  Dort hat sie einen Schalter **„Einschalter“** (englisch „Power“), z. B.
+  `switch.kaffeevollautomat_einschalter` oder `switch.kaffeevollautomat_power`.
 - Die Alarmanlage ist in Home Assistant eingebunden – als Alarmzentrale
   (`alarm_control_panel.…`, z. B. über die Integration des Herstellers oder
   über [Alarmo](https://github.com/nielsfaber/alarmo)) **oder** als andere
@@ -130,6 +130,38 @@ Wer lieber eine einfache Automation ohne Blueprint möchte:
    einfügen.
 4. Die mit `# <- anpassen` markierten Entitäts-IDs auf die eigene Alarmanlage
    und Kaffeemaschine ändern und speichern.
+
+## Home Connect einrichten
+
+Die Kaffeemaschine kommt über die Integration
+[Home Connect](https://www.home-assistant.io/integrations/home_connect/) nach
+Home Assistant. Dafür braucht es einmalig einen kostenlosen Entwicklerzugang
+bei Home Connect; rechne mit etwa 15 Minuten plus Wartezeit.
+
+1. **Entwicklerkonto anlegen:** Auf <https://developer.home-connect.com>
+   registrieren. Bei der Anmeldung unter „Default Home Connect User Account for
+   Testing“ die E-Mail-Adresse eintragen, mit der du dich in der
+   Home-Connect-App anmeldest – **komplett in Kleinbuchstaben**, sonst
+   scheitert später die Anmeldung.
+2. **Anwendung registrieren:** Im Entwicklerportal **Applications → Register
+   Application** mit diesen Werten:
+   - Application ID: `Home Assistant` (frei wählbar)
+   - OAuth Flow: `Authorization Code Grant Flow`
+   - Redirect URI: `https://my.home-assistant.io/redirect/oauth`
+
+   Danach bei der Anwendung auf **Details** klicken und **Client ID** und
+   **Client Secret** notieren.
+3. **15 Minuten warten, dann abmelden:** Änderungen im Entwicklerportal
+   brauchen etwa 15 Minuten. Danach dort **ausloggen**. Bleibst du angemeldet,
+   scheitert der nächste Schritt mit `unauthorized_client`.
+4. **Adresse hinterlegen:** Auf <https://my.home-assistant.io/> muss die
+   Adresse deines Home Assistant stehen, z. B. `http://homeassistant.local:8123`.
+5. **Integration hinzufügen:** In Home Assistant **Einstellungen → Geräte &
+   Dienste → Integration hinzufügen → „Home Connect“**, Client ID und Client
+   Secret eintragen, dann bei Home Connect anmelden und den Zugriff erlauben.
+6. Die Kaffeemaschine erscheint mit dem Schalter **„Einschalter“**
+   (`switch.…_power` bzw. `…_einschalter`). Jetzt `installieren.py` erneut
+   ausführen.
 
 ## Ausprobieren
 
