@@ -37,7 +37,48 @@ Kurzer Test vorab: Schalte den „Einschalter“ der Kaffeemaschine in Home
 Assistant einmal von Hand ein. Geht die Maschine an, funktioniert auch die
 Automation.
 
-## Einrichten mit Blueprint (empfohlen)
+## Einrichten per Skript (ein Befehl)
+
+[`installieren.py`](installieren.py) richtet die Automation von einem Rechner
+im Heimnetz aus ein – z. B. vom Mac mini. Es sucht Alarmanlage und
+Kaffeemaschine selbst heraus, legt die Automation an und prüft, dass sie aktiv
+ist. Es braucht nur Python 3, keine Zusatzpakete.
+
+1. Terminal öffnen (Mac: Programme → Dienstprogramme → Terminal) und
+   einfügen:
+
+   ```bash
+   curl -fsSLO https://raw.githubusercontent.com/JensReinke/siemens-Kaffee/HEAD/installieren.py
+   python3 installieren.py --url http://homeassistant.local:8123
+   ```
+
+   Falls macOS fragt, ob die „Befehlszeilen-Entwicklerwerkzeuge“ installiert
+   werden sollen: bestätigen und den Befehl danach noch einmal ausführen.
+   Ist Home Assistant unter einer anderen Adresse erreichbar, diese bei
+   `--url` eintragen.
+2. Benutzername und Passwort von Home Assistant eingeben (ein Benutzer mit
+   Administratorrechten). Das Skript meldet sich damit genauso an wie die
+   Oberfläche und widerruft die Anmeldung am Ende wieder.
+3. Findet das Skript mehrere Alarmanlagen oder mehrere Home-Connect-Geräte,
+   fragt es nach, welche gemeint sind.
+
+Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen.
+Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
+
+| Option | Wirkung |
+| --- | --- |
+| `--probelauf` | Löst die Automation nach dem Einrichten einmal aus – die Kaffeemaschine geht wirklich an. |
+| `--nur-anzeigen` | Zeigt nur, was eingerichtet würde, ändert nichts. |
+| `--von 6:00 --bis 10:00` | Anderes Zeitfenster. |
+| `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen. |
+| `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
+
+Das Skript legt die Automation ohne Blueprint an (wie in
+[`beispiele/automation_ohne_blueprint.yaml`](beispiele/automation_ohne_blueprint.yaml)).
+Sie lässt sich danach ganz normal unter **Einstellungen → Automationen &
+Szenen** bearbeiten.
+
+## Einrichten mit Blueprint
 
 1. Blueprint importieren:
 
@@ -98,6 +139,7 @@ Warum die Automation (nicht) gelaufen ist, zeigt ihre **Ablaufverfolgung**
 | --- | --- |
 | [`blueprints/automation/siemens_kaffee/kaffeemaschine_bei_unscharf.yaml`](blueprints/automation/siemens_kaffee/kaffeemaschine_bei_unscharf.yaml) | Blueprint |
 | [`beispiele/automation_ohne_blueprint.yaml`](beispiele/automation_ohne_blueprint.yaml) | Dieselbe Automation ohne Blueprint |
+| [`installieren.py`](installieren.py) | Richtet die Automation per Befehl in Home Assistant ein |
 | [`tests/`](tests/) | Automatische Tests |
 
 ## Tests
@@ -105,8 +147,9 @@ Warum die Automation (nicht) gelaufen ist, zeigt ihre **Ablaufverfolgung**
 Die Tests starten ein echtes Home Assistant, laden Blueprint und YAML-Variante
 und spielen u. a. Uhrzeiten an den Grenzen des Zeitfensters, alle
 Alarmanlagen-Zustände, Neustarts, abgebrochenes Scharfschalten und eine schon
-laufende Maschine durch. Sie laufen bei jedem Push über GitHub Actions; lokal
-mit Python 3.14:
+laufende Maschine durch. `installieren.py` wird gegen den echten HTTP-Server
+von Home Assistant getestet, samt Anmeldung, Gerätesuche und Probelauf. Die
+Tests laufen bei jedem Push über GitHub Actions; lokal mit Python 3.14:
 
 ```bash
 pip install -r requirements_test.txt
