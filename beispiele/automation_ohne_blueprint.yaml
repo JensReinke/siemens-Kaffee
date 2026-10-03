@@ -11,7 +11,7 @@ max_exceeded: silent
 triggers:
   - trigger: state
     entity_id: alarm_control_panel.alarmanlage  # <- anpassen
-    to: disarmed
+    to: disarmed  # bei einer Systemvariable statt Alarmzentrale z. B. Unscharf
     # Nicht reagieren, wenn die Alarmanlage nach einem Neustart wieder
     # erreichbar wird oder ein Scharfschaltvorgang abgebrochen wurde.
     not_from:

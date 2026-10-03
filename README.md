@@ -29,9 +29,17 @@ Benachrichtigung aufs Handy) ergänzen.
   eingebunden. Dort hat sie einen Schalter **„Einschalter“** (englisch
   „Power“), z. B. `switch.kaffeevollautomat_einschalter` oder
   `switch.kaffeevollautomat_power`.
-- Die Alarmanlage ist in Home Assistant als Alarmzentrale eingebunden
-  (`alarm_control_panel.…`), z. B. über die Integration des Herstellers oder
-  über [Alarmo](https://github.com/nielsfaber/alarmo).
+- Die Alarmanlage ist in Home Assistant eingebunden – als Alarmzentrale
+  (`alarm_control_panel.…`, z. B. über die Integration des Herstellers oder
+  über [Alarmo](https://github.com/nielsfaber/alarmo)) **oder** als andere
+  Entität, die ihren Zustand meldet, z. B. eine Systemvariable der
+  Homematic-CCU (OpenCCU/RaspberryMatic) über
+  [Homematic(IP) Local](https://github.com/sukramj/homematicip_local) als
+  Sensor, Auswahl oder Schalter. Dann muss nur bekannt sein, welcher Zustand
+  „unscharf“ bedeutet (z. B. `Unscharf` oder `off`). Taucht die
+  Systemvariable in Home Assistant nicht auf, ist ihre Entität vermutlich
+  deaktiviert: **Einstellungen → Geräte & Dienste → Entitäten**, Filter
+  „Deaktivierte Entitäten anzeigen“, Entität öffnen und aktivieren.
 
 Kurzer Test vorab: Schalte den „Einschalter“ der Kaffeemaschine in Home
 Assistant einmal von Hand ein. Geht die Maschine an, funktioniert auch die
@@ -60,7 +68,9 @@ ist. Es braucht nur Python 3, keine Zusatzpakete.
    Administratorrechten). Das Skript meldet sich damit genauso an wie die
    Oberfläche und widerruft die Anmeldung am Ende wieder.
 3. Findet das Skript mehrere Alarmanlagen oder mehrere Home-Connect-Geräte,
-   fragt es nach, welche gemeint sind.
+   fragt es nach, welche gemeint sind. Ist die Alarmanlage keine
+   Alarmzentrale (z. B. eine CCU-Systemvariable), fragt es außerdem, welcher
+   Zustand „unscharf“ bedeutet, und schlägt den aktuellen Zustand vor.
 
 Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen.
 Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
@@ -71,6 +81,7 @@ Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
 | `--nur-anzeigen` | Zeigt nur, was eingerichtet würde, ändert nichts. |
 | `--von 6:00 --bis 10:00` | Anderes Zeitfenster. |
 | `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen. |
+| `--unscharf Unscharf` | Zustand, der „unscharf“ bedeutet, wenn die Alarmanlage keine Alarmzentrale ist. |
 | `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
 
 Das Skript legt die Automation ohne Blueprint an (wie in
@@ -93,8 +104,10 @@ Szenen** bearbeiten.
 
 2. Beim Blueprint **„Kaffeemaschine an, wenn die Alarmanlage morgens unscharf
    geschaltet wird“** auf **Automation erstellen** klicken.
-3. **Alarmanlage** und **Kaffeemaschine** auswählen. Das Zeitfenster steht
-   schon auf 05:00 bis 09:00 Uhr.
+3. **Alarmanlage** und **Kaffeemaschine** auswählen. Ist die Alarmanlage
+   keine Alarmzentrale (z. B. eine CCU-Systemvariable), bei **Zustand
+   „unscharf“** den passenden Wert eintragen. Das Zeitfenster steht schon auf
+   05:00 bis 09:00 Uhr.
 4. Speichern – fertig.
 
 ## Einrichten ohne Blueprint

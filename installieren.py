@@ -7,6 +7,11 @@ Assistant über dessen REST-API, sucht Alarmanlage und Kaffeemaschine
 (Home Connect) heraus, legt die Automation an und prüft, dass sie aktiv ist.
 Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen.
 
+Die Alarmanlage kann eine Alarmzentrale (alarm_control_panel) sein oder eine
+andere Entität, die ihren Zustand meldet – z. B. eine Systemvariable der
+Homematic-CCU (OpenCCU). Dann fragt das Skript, welcher Zustand „unscharf“
+bedeutet (oder nimmt --unscharf).
+
 Aufruf im Heimnetz, z. B. auf einem Mac oder PC:
 
     python3 installieren.py --url http://homeassistant.local:8123
@@ -38,6 +43,18 @@ STANDARD_URL = "http://homeassistant.local:8123"
 STANDARD_VON = "05:00"
 STANDARD_BIS = "09:00"
 ZEITLIMIT = 30  # Sekunden pro Anfrage
+STANDARD_UNSCHARF = "disarmed"  # Zustand „unscharf“ einer Alarmzentrale
+
+# Entitäten, die den Zustand der Alarmanlage melden können – eine Alarmzentrale
+# oder z. B. eine Systemvariable der Homematic-CCU als Sensor, Auswahl oder Schalter.
+ALARM_DOMAINS = (
+    "alarm_control_panel", "sensor", "binary_sensor", "select", "input_select",
+    "input_boolean", "switch",
+)
+ALARM_WOERTER = re.compile(
+    r"alarm|scharf|sicherheit|security|secur|h[üu]llschutz|vollschutz|einbruch|intrusion",
+    re.IGNORECASE,
+)
 
 # Woran man den „Einschalter“ (englisch „Power“) eines Home-Connect-Geräts
 # und eine Kaffeemaschine erkennt – an Entitäts-IDs, Namen und Modell.
@@ -70,9 +87,18 @@ class Abbruch(Exception):
 
 
 def automation_config(
-    alarmanlage: str, kaffeemaschine: str, von: str, bis: str
+    alarmanlage: str,
+    kaffeemaschine: str,
+    von: str,
+    bis: str,
+    unscharf: str = STANDARD_UNSCHARF,
 ) -> dict[str, Any]:
     """Dieselbe Automation wie beispiele/automation_ohne_blueprint.yaml."""
+    # Nicht reagieren, wenn die Alarmanlage nach einem Neustart wieder erreichbar
+    # wird oder (bei einer Alarmzentrale) ein Scharfschalten abgebrochen wurde.
+    nicht_von = ["unavailable", "unknown"]
+    if alarmanlage.startswith("alarm_control_panel."):
+        nicht_von.append("arming")
     return {
         "alias": ALIAS,
         "description": (
@@ -85,10 +111,8 @@ def automation_config(
             {
                 "trigger": "state",
                 "entity_id": alarmanlage,
-                "to": "disarmed",
-                # Nicht reagieren, wenn die Alarmanlage nach einem Neustart
-                # wieder erreichbar wird oder ein Scharfschalten abgebrochen wurde.
-                "not_from": ["unavailable", "unknown", "arming"],
+                "to": unscharf,
+                "not_from": nicht_von,
             }
         ],
         "conditions": [
@@ -333,6 +357,68 @@ def kandidaten_kaffeemaschine(
     return kandidaten
 
 
+def kandidaten_alarmanlage(zustaende: dict[str, dict[str, Any]]) -> list[tuple[str, str]]:
+    """Alarmzentralen – oder, wenn es keine gibt, Entitäten, die nach Alarmanlage klingen."""
+    zentralen = [
+        (entity_id, f"„{name_von(zustand)}“")
+        for entity_id, zustand in sorted(zustaende.items())
+        if entity_id.startswith("alarm_control_panel.")
+    ]
+    if zentralen:
+        return zentralen
+    return [
+        (entity_id, f"„{name_von(zustand)}“, Zustand: {zustand['state']}")
+        for entity_id, zustand in sorted(zustaende.items())
+        if entity_id.split(".", 1)[0] in ALARM_DOMAINS
+        and (ALARM_WOERTER.search(entity_id) or ALARM_WOERTER.search(name_von(zustand)))
+    ]
+
+
+def unscharf_bestimmen(
+    alarmanlage: str,
+    zustaende: dict[str, dict[str, Any]],
+    vorgabe: Optional[str],
+    interaktiv: bool,
+) -> str:
+    """Welcher Zustand der Alarmanlage „unscharf“ bedeutet.
+
+    Bei einer Alarmzentrale ist das ``disarmed``; bei allem anderen (z. B. einer
+    Systemvariable der CCU) muss es angegeben oder erfragt werden.
+    """
+    if vorgabe:
+        return vorgabe
+    if alarmanlage.startswith("alarm_control_panel."):
+        return STANDARD_UNSCHARF
+    zustand = zustaende[alarmanlage]
+    aktuell = str(zustand["state"])
+    optionen = zustand.get("attributes", {}).get("options")
+    if alarmanlage.split(".", 1)[0] in ("binary_sensor", "switch", "input_boolean"):
+        optionen = ["off", "on"]  # „off“ = aus, „on“ = an
+    frage = (
+        f"„{name_von(zustand)}“ ist keine Alarmzentrale. Welcher Zustand bedeutet "
+        f"„unscharf“? Aktuell: „{aktuell}“"
+    )
+    if not interaktiv:
+        moeglich = f", möglich: {', '.join(map(str, optionen))}" if optionen else ""
+        raise Abbruch(f"{frage}{moeglich}.\n  Bitte mit --unscharf <Zustand> angeben.")
+    if optionen:
+        return str(optionen[menue(frage, [str(o) for o in optionen])])
+    print(f"\n{frage}")
+    antwort = input(f"Zustand für „unscharf“ [{aktuell}]: ").strip()
+    return antwort or aktuell
+
+
+def menue(frage: str, eintraege: list[str]) -> int:
+    """Lässt den Benutzer einen Eintrag wählen und gibt dessen Index zurück."""
+    print(f"\n{frage}")
+    for nr, eintrag in enumerate(eintraege, 1):
+        print(f"  {nr}) {eintrag}")
+    while True:
+        antwort = input(f"Nummer [1-{len(eintraege)}]: ").strip()
+        if antwort.isdigit() and 1 <= int(antwort) <= len(eintraege):
+            return int(antwort) - 1
+
+
 def auswaehlen(
     kandidaten: list[tuple[str, str]],
     fehlt: str,
@@ -363,18 +449,22 @@ def auswaehlen(
             f"Mehrere Möglichkeiten für {fuer} gefunden:\n{liste}\n"
             f"  Bitte mit {option} <entity_id> angeben, welche gemeint ist."
         )
-    print(f"\nMehrere Möglichkeiten für {fuer} gefunden:\n{liste}")
-    while True:
-        antwort = input(f"Welche ist gemeint? [1-{len(kandidaten)}] ").strip()
-        if antwort.isdigit() and 1 <= int(antwort) <= len(kandidaten):
-            return kandidaten[int(antwort) - 1][0]
+    gewaehlt = menue(
+        f"Mehrere Möglichkeiten für {fuer} gefunden – welche ist gemeint?",
+        [f"{entity_id}  {beschreibung}" for entity_id, beschreibung in kandidaten],
+    )
+    return kandidaten[gewaehlt][0]
 
 
 def entitaet_pruefen(
-    entity_id: str, domain: str, zustaende: dict[str, dict[str, Any]], option: str
+    entity_id: str,
+    domains: tuple[str, ...],
+    zustaende: dict[str, dict[str, Any]],
+    option: str,
 ) -> str:
-    if not entity_id.startswith(domain + "."):
-        raise Abbruch(f"{option} erwartet eine Entität aus dem Bereich „{domain}“, nicht „{entity_id}“.")
+    if entity_id.split(".", 1)[0] not in domains:
+        bereiche = ", ".join(f"„{domain}“" for domain in domains)
+        raise Abbruch(f"{option} erwartet eine Entität aus dem Bereich {bereiche}, nicht „{entity_id}“.")
     if entity_id not in zustaende:
         raise Abbruch(f"Die Entität „{entity_id}“ gibt es in Home Assistant nicht.")
     return entity_id
@@ -464,6 +554,14 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--alarmanlage",
         help="Entitäts-ID der Alarmanlage, falls sie nicht automatisch gefunden wird",
     )
+    parser.add_argument(
+        "--unscharf",
+        help=(
+            "Zustand der Alarmanlage, der „unscharf“ bedeutet – bei einer Alarmzentrale "
+            f"„{STANDARD_UNSCHARF}“ (Standard), bei einer Systemvariable z. B. „Unscharf“ "
+            "oder „off“; ohne Angabe wird gefragt"
+        ),
+    )
     parser.add_argument("--kaffeemaschine", help="Entitäts-ID des Einschalters der Kaffeemaschine")
     parser.add_argument(
         "--von",
@@ -532,24 +630,22 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
 
     zustaende = {z["entity_id"]: z for z in ha.get_json("/api/states")}
     if args.alarmanlage:
-        alarmanlage = entitaet_pruefen(args.alarmanlage, "alarm_control_panel", zustaende, "--alarmanlage")
+        alarmanlage = entitaet_pruefen(args.alarmanlage, ALARM_DOMAINS, zustaende, "--alarmanlage")
     else:
         alarmanlage = auswaehlen(
-            [
-                (entity_id, f"„{name_von(zustand)}“")
-                for entity_id, zustand in sorted(zustaende.items())
-                if entity_id.startswith("alarm_control_panel.")
-            ],
+            kandidaten_alarmanlage(zustaende),
             "Keine Alarmanlage",
             "die Alarmanlage",
             "--alarmanlage",
             interaktiv,
-            "Ist die Alarmanlage als Alarmzentrale (alarm_control_panel) eingebunden?",
+            "Ist die Alarmanlage in Home Assistant eingebunden – als Alarmzentrale "
+            "(alarm_control_panel) oder z. B. als Systemvariable der CCU (Sensor, Auswahl, Schalter)?",
         )
-    print(f"✓ Alarmanlage: {alarmanlage} („{name_von(zustaende[alarmanlage])}“)")
+    unscharf = unscharf_bestimmen(alarmanlage, zustaende, args.unscharf, interaktiv)
+    print(f"✓ Alarmanlage: {alarmanlage} („{name_von(zustaende[alarmanlage])}“), unscharf = „{unscharf}“")
 
     if args.kaffeemaschine:
-        kaffeemaschine = entitaet_pruefen(args.kaffeemaschine, "switch", zustaende, "--kaffeemaschine")
+        kaffeemaschine = entitaet_pruefen(args.kaffeemaschine, ("switch",), zustaende, "--kaffeemaschine")
     else:
         kaffeemaschine = auswaehlen(
             kandidaten_kaffeemaschine(ha, zustaende),
@@ -561,7 +657,7 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
         )
     print(f"✓ Kaffeemaschine: {kaffeemaschine} („{name_von(zustaende[kaffeemaschine])}“)")
 
-    config = automation_config(alarmanlage, kaffeemaschine, args.von, args.bis)
+    config = automation_config(alarmanlage, kaffeemaschine, args.von, args.bis, unscharf)
     if args.nur_anzeigen:
         print("\nDiese Automation würde eingerichtet (nichts geändert):")
         print(json.dumps(config, indent=2, ensure_ascii=False))
