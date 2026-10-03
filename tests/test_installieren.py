@@ -21,6 +21,7 @@ import yaml
 from aiohttp.test_utils import TestClient
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.auth import auth_provider_from_config
+from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry, ConfigFlow
 from homeassistant.core import HomeAssistant
@@ -57,6 +58,17 @@ def um(uhrzeit: str, tag: str = "2026-10-05") -> datetime:
     return datetime.fromisoformat(f"{tag} {uhrzeit}").replace(tzinfo=BERLIN)
 
 
+class Systemvariable(BinarySensorEntity):
+    """Stellvertretend für eine Systemvariable der CCU, wie Homematic(IP) Local sie anlegt."""
+
+    _attr_should_poll = False
+
+    def __init__(self, name: str, an: bool) -> None:
+        self._attr_name = f"RaspberryMatic {name}"
+        self._attr_unique_id = f"sysvar-{name}"
+        self._attr_is_on = an
+
+
 class HomeConnectSchalter(SwitchEntity):
     """Ein Schalter, wie ihn die Home-Connect-Integration anlegt."""
 
@@ -84,7 +96,7 @@ class HomeConnectSchalter(SwitchEntity):
 
 
 Geraete = dict[str, tuple[str, list[str]]]
-HomeConnectEinrichten = Callable[[Geraete], Awaitable[MockConfigEntry]]
+HomeConnectEinrichten = Callable[..., Awaitable[MockConfigEntry]]
 
 
 @pytest.fixture
@@ -98,20 +110,28 @@ def home_connect(hass: HomeAssistant) -> Iterator[HomeConnectEinrichten]:
         yield partial(home_connect_einrichten, hass)
 
 
-async def home_connect_einrichten(hass: HomeAssistant, geraete: Geraete) -> MockConfigEntry:
+async def home_connect_einrichten(
+    hass: HomeAssistant,
+    geraete: Geraete,
+    variablen: dict[str, bool] | None = None,
+    deaktiviert: set[str] = frozenset(),
+) -> MockConfigEntry:
     """Spielt Home Connect nach: Gerätename → (Modell, weitere Entitäten des Geräts).
 
     Jedes Gerät bekommt wie in echt die Schalter „Einschalter“ und
     „Kindersicherung“; die weiteren Entitäten (z. B. ein Kaffeezähler) stehen
-    nur im Entitätsregister. Gibt den Konfigurationseintrag zurück.
+    nur im Entitätsregister. ``variablen`` (Name → an?) legt stellvertretend für
+    CCU-Systemvariablen Binärsensoren an, die in ``deaktiviert`` von Anfang an
+    deaktiviert sind. Gibt den Konfigurationseintrag zurück.
     """
+    plattformen = ["switch", "binary_sensor"]
 
     async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-        await hass.config_entries.async_forward_entry_setups(entry, ["switch"])
+        await hass.config_entries.async_forward_entry_setups(entry, plattformen)
         return True
 
     async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-        return await hass.config_entries.async_unload_platforms(entry, ["switch"])
+        return await hass.config_entries.async_unload_platforms(entry, plattformen)
 
     async def async_setup_switch(
         hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -121,6 +141,11 @@ async def home_connect_einrichten(hass: HomeAssistant, geraete: Geraete) -> Mock
             for geraet, (modell, _) in geraete.items()
             for name in ("Einschalter", "Kindersicherung")
         )
+
+    async def async_setup_binary_sensor(
+        hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    ) -> None:
+        async_add_entities(Systemvariable(name, an) for name, an in (variablen or {}).items())
 
     mock_integration(
         hass,
@@ -132,8 +157,24 @@ async def home_connect_einrichten(hass: HomeAssistant, geraete: Geraete) -> Mock
     )
     mock_platform(hass, f"{HOME_CONNECT}.config_flow", None)
     mock_platform(hass, f"{HOME_CONNECT}.switch", MockPlatform(async_setup_entry=async_setup_switch))
+    mock_platform(
+        hass,
+        f"{HOME_CONNECT}.binary_sensor",
+        MockPlatform(async_setup_entry=async_setup_binary_sensor),
+    )
     eintrag = MockConfigEntry(domain=HOME_CONNECT, title="Home Connect")
     eintrag.add_to_hass(hass)
+    for name in deaktiviert:
+        # Schon vor dem Laden im Register als deaktiviert eingetragen – so bekommt
+        # die Entität keinen Zustand, genau wie eine frisch importierte Systemvariable.
+        er.async_get(hass).async_get_or_create(
+            "binary_sensor",
+            HOME_CONNECT,
+            f"sysvar-{name}",
+            config_entry=eintrag,
+            suggested_object_id=f"raspberrymatic_{name}",
+            disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+        )
     assert await hass.config_entries.async_setup(eintrag.entry_id)
     await hass.async_block_till_done()
 
@@ -174,6 +215,7 @@ async def home_assistant(hass: HomeAssistant, tmp_path: Path) -> HomeAssistant:
     for komponente, config in (
         ("auth", {}),
         ("api", {}),
+        ("websocket_api", {}),
         ("config", {}),
         ("automation", {"automation": []}),
     ):
@@ -773,8 +815,101 @@ async def test_deaktivierte_entitaeten_werden_genannt(
     assert "Keine Alarmanlage in Home Assistant gefunden" in fehler
     assert "sie sind aber deaktiviert" in fehler
     assert f"    {INTERN}\n" in fehler
+    assert "--alarmanlage <entity_id> angegeben, aktiviert dieses Skript sie selbst" in fehler
     assert "„Deaktivierte Entitäten anzeigen“" in fehler and "„hahm“" in fehler
     assert "switch.kaffeevollautomat" not in fehler
+
+
+# --- Deaktivierte Systemvariable selbst aktivieren -------------------------------
+
+VARIABLE_NAME = "Sv Alarm Intern scharf"
+VARIABLE = "binary_sensor.raspberrymatic_sv_alarm_intern_scharf"
+
+
+def sofort_neuladen() -> Any:
+    """Lässt Home Assistant die Integration nach dem Aktivieren sofort statt nach 30 s neu laden."""
+    return patch("homeassistant.config_entries.RELOAD_AFTER_UPDATE_DELAY", 0)
+
+
+async def test_aktiviert_angegebene_variable_selbst(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Eine mit --alarmanlage angegebene, deaktivierte Entität aktiviert das Skript und wartet auf sie."""
+    home_assistant.states.async_remove(ALARMANLAGE)
+    await home_connect(KAFFEEVOLLAUTOMAT, variablen={VARIABLE_NAME: False}, deaktiviert={VARIABLE_NAME})
+    assert home_assistant.states.get(VARIABLE) is None
+
+    with sofort_neuladen():
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token,
+            "--alarmanlage", VARIABLE, "--unscharf", "off",
+        )
+    assert code == 0, fehler
+    assert er.async_get(home_assistant).async_get(VARIABLE).disabled_by is None
+    assert f"{VARIABLE} ist deaktiviert – wird aktiviert." in ausgabe
+    assert f"✓ {VARIABLE} aktiviert" in ausgabe
+    assert "lädt die Integration nach etwa 30 Sekunden neu … da." in ausgabe
+    assert home_assistant.states.get(VARIABLE).state == "off"
+    [automation] = gespeicherte_automationen(home_assistant)
+    assert automation["triggers"][0] == {
+        "trigger": "state",
+        "entity_id": VARIABLE,
+        "to": "off",
+        "not_from": ["unavailable", "unknown"],
+    }
+
+
+async def test_bietet_aktivierung_im_terminal_an(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ohne Angabe fragt das Skript, ob es die deaktivierte Variable aktivieren soll."""
+    home_assistant.states.async_remove(ALARMANLAGE)
+    await home_connect(KAFFEEVOLLAUTOMAT, variablen={VARIABLE_NAME: False}, deaktiviert={VARIABLE_NAME})
+
+    # Antworten: Nr. 1 der deaktivierten Entitäten, dann „off“ (Nr. 1) als „unscharf“.
+    with (
+        sofort_neuladen(),
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=["1", "1"]),
+    ):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert "Soll ich eine davon aktivieren und als Alarmanlage verwenden?" in ausgabe
+    assert f"1) {VARIABLE}" in ausgabe
+    assert f"✓ {VARIABLE} aktiviert" in ausgabe
+    assert f"✓ Alarmanlage: {VARIABLE} („RaspberryMatic {VARIABLE_NAME}“), unscharf = „off“" in ausgabe
+    assert len(gespeicherte_automationen(home_assistant)) == 1
+
+
+async def test_ueberspringen_der_aktivierung(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mit Enter wird nichts aktiviert; dann läuft die normale Auswahl weiter."""
+    home_assistant.states.async_remove(ALARMANLAGE)
+    await home_connect(KAFFEEVOLLAUTOMAT, variablen={VARIABLE_NAME: False}, deaktiviert={VARIABLE_NAME})
+    home_assistant.states.async_set(SYSTEMVARIABLE, "Unscharf", {"friendly_name": "OpenCCU Alarmanlage"})
+
+    with (
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=["", ""]),
+    ):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert "Soll ich eine davon aktivieren und als Alarmanlage verwenden?" in ausgabe
+    assert er.async_get(home_assistant).async_get(VARIABLE).disabled_by is not None
+    assert f"✓ Alarmanlage: {SYSTEMVARIABLE} („OpenCCU Alarmanlage“), unscharf = „Unscharf“" in ausgabe
 
 
 # --- Kleinkram ---------------------------------------------------------------
