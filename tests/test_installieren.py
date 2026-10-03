@@ -601,6 +601,71 @@ async def test_home_connect_nicht_geladen(
     assert len(gespeicherte_automationen(home_assistant)) == 1
 
 
+async def ccu_einrichten(hass: HomeAssistant, programme: int = 60) -> None:
+    """Eine Zentrale wie die CCU: viele deaktivierte Programm-Schalter, eines heißt „Kaffee“."""
+    eintrag = MockConfigEntry(domain="homematicip_local", title="RaspberryMatic")
+    eintrag.add_to_hass(hass)
+    zentrale = dr.async_get(hass).async_get_or_create(
+        config_entry_id=eintrag.entry_id,
+        identifiers={("homematicip_local", "ccu")},
+        name="RaspberryMatic",
+        manufacturer="eQ-3",
+        model="CCU",
+    )
+    namen = [f"p_programm_{nr}" for nr in range(programme)] + ["p_kaffee_am_morgen"]
+    for name in namen:
+        er.async_get(hass).async_get_or_create(
+            "switch",
+            "homematicip_local",
+            name,
+            config_entry=eintrag,
+            device_id=zentrale.id,
+            suggested_object_id=f"raspberrymatic_{name}",
+            disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+        )
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_zentrale_ist_keine_kaffeemaschine(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ein Programm namens „Kaffee“ macht die CCU nicht zur Kaffeemaschine – kein Riesenmenü."""
+    await ccu_einrichten(home_assistant)
+    with (
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=AssertionError("Es darf keine Rückfrage geben")),
+    ):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert f"✓ Kaffeemaschine: {KAFFEEMASCHINE}" in ausgabe
+    assert "raspberrymatic" not in ausgabe
+
+
+async def test_nur_zentrale_ohne_kaffeemaschine(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ohne Kaffeemaschine bleibt die Meldung kurz und nennt nur Passendes aus der CCU."""
+    await ccu_einrichten(home_assistant)
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 1
+    assert "Kein Einschalter der Kaffeemaschine in Home Assistant gefunden" in fehler
+    assert "Die Integration „Home Connect“ ist in Home Assistant nicht eingerichtet" in fehler
+    assert "Aktive Schalter mit Kaffee-Bezug: keine" in fehler
+    assert "switch.raspberrymatic_p_programm_" not in fehler
+    assert fehler.count("\n") < 15
+
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--diagnose")
+    assert code == 0, fehler
+    assert "switch.raspberrymatic_p_kaffee_am_morgen" not in ausgabe  # kein Kaffee-Gerät, keine Zentrale gelistet
+    assert ausgabe.count("\n") < 15
+
+
 @pytest.mark.usefixtures("kaffeemaschine")
 async def test_diagnose(
     home_assistant: HomeAssistant,
@@ -639,7 +704,7 @@ async def test_deaktivierter_einschalter_wird_aktiviert(
     assert "Kein Einschalter der Kaffeemaschine in Home Assistant gefunden" in fehler
     assert f"    {KAFFEEMASCHINE}\n" in fehler
     assert "--kaffeemaschine <entity_id> angegeben, aktiviert dieses Skript sie selbst" in fehler
-    assert "kindersicherung" not in fehler
+    assert "1) switch.kaffeevollautomat_kindersicherung" not in fehler  # nicht als Kandidat angeboten
 
     # Im Terminal: Angebot, den Schalter zu aktivieren.
     with (
