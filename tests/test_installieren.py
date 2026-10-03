@@ -722,6 +722,62 @@ async def test_deaktivierter_einschalter_wird_aktiviert(
     assert automation["actions"][0]["target"]["entity_id"] == KAFFEEMASCHINE
 
 
+async def test_alte_steckdose_wird_nicht_angeboten_wenn_kaffeemaschine_da_ist(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Gibt es einen aktiven Einschalter, werden deaktivierte Schalter anderer „Kaffee“-Geräte nicht angeboten."""
+    await home_connect(KAFFEEVOLLAUTOMAT)
+    # Eine alte Homematic-Steckdose „LED Kaffee“: Hauptschalter nicht verfügbar, Rest deaktiviert.
+    eintrag = MockConfigEntry(domain="homematicip_local", title="RaspberryMatic")
+    eintrag.add_to_hass(home_assistant)
+    steckdose = dr.async_get(home_assistant).async_get_or_create(
+        config_entry_id=eintrag.entry_id,
+        identifiers={("homematicip_local", "psm")},
+        name="LED Kaffee",
+        manufacturer="eQ-3",
+        model="HMIP-PSM",
+    )
+    for name, deaktiviert in (("", False), ("vch4", True), ("vch5", True)):
+        er.async_get(home_assistant).async_get_or_create(
+            "switch",
+            "homematicip_local",
+            f"psm-{name or 'main'}",
+            config_entry=eintrag,
+            device_id=steckdose.id,
+            suggested_object_id=f"led_kaffee_{name}".rstrip("_"),
+            disabled_by=er.RegistryEntryDisabler.INTEGRATION if deaktiviert else None,
+        )
+    home_assistant.states.async_set("switch.led_kaffee", "unavailable", {"friendly_name": "LED Kaffee"})
+
+    with (
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=AssertionError("Es darf keine Rückfrage geben")),
+    ):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert f"✓ Kaffeemaschine: {KAFFEEMASCHINE}" in ausgabe
+    assert "led_kaffee" not in ausgabe
+
+
+async def test_grosse_home_connect_geraete_bleiben_kaffeemaschinen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ein Kaffeevollautomat mit sehr vielen Entitäten gilt nicht als Zentrale."""
+    viele = [f"sensor.konrad_zaehler_{nr}" for nr in range(45)] + ["sensor.konrad_coffee_counter"]
+    await home_connect({"Konrad": ("TQ903DZ3", viele)})
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert "✓ Kaffeemaschine: switch.konrad_einschalter („Konrad Einschalter“)" in ausgabe
+
+
 async def test_angegebener_deaktivierter_einschalter_wird_aktiviert(
     home_assistant: HomeAssistant,
     client: TestClient,

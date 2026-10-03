@@ -724,8 +724,12 @@ class Register:
         return any(e.get("domain") in HOME_CONNECT_DOMAINS for e in self.integrationen_von(geraet))
 
     def ist_gross(self, geraet: dict[str, Any]) -> bool:
-        """Eine Zentrale wie die CCU mit hunderten Programmen und Variablen."""
-        return len(self.entitaeten_von(geraet)) > GROSSES_GERAET
+        """Eine Zentrale wie die CCU mit hunderten Programmen und Variablen.
+
+        Hausgeräte von Home Connect sind nie eine Zentrale, auch wenn ein
+        Kaffeevollautomat viele Entitäten hat.
+        """
+        return not self.ist_home_connect(geraet) and len(self.entitaeten_von(geraet)) > GROSSES_GERAET
 
     def ist_kaffeemaschine(self, geraet: dict[str, Any]) -> bool:
         """Erkennt eine Kaffeemaschine an Name, Modell oder ihren Entitäten (Bohnen, Kaffeezähler …).
@@ -1199,7 +1203,9 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
     else:
         kandidaten, deaktiviert, hinweis = kandidaten_kaffeemaschine(ha.register(), zustaende)
         gewaehlt: list[str] = []
-        if deaktiviert:
+        # Deaktivierte Schalter nur anbieten, wenn kein aktiver Einschalter da ist –
+        # sonst steht eine alte Steckdose neben der echten Kaffeemaschine.
+        if deaktiviert and not kandidaten:
             hinweis = hinweis_deaktiviert(deaktiviert, "--kaffeemaschine") + "\n  " + hinweis
             if interaktiv and len(deaktiviert) <= MAX_ANGEBOT:
                 gewaehlt = deaktivierte_anbieten(
