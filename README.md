@@ -11,7 +11,8 @@ Küche bist, ist er schon bereit.
   „Nacht“, „Zuhause“, „Abwesend“ o. Ä. scharf war.
 - Nur von 05:00 bis 09:00 Uhr. 09:00 Uhr selbst zählt nicht mehr dazu.
 - Kein Einschalten, wenn Home Assistant oder die Alarm-Integration neu startet
-  oder ein Scharfschalten abgebrochen wird.
+  oder ein Scharfschalten noch während der Ausgangsverzögerung abgebrochen
+  wird.
 - Ist die Kaffeemaschine schon an, passiert nichts.
 - Wird morgens mehrmals unscharf geschaltet, geht die Maschine jedes Mal an,
   wenn sie gerade aus ist.
@@ -70,10 +71,11 @@ Wer lieber eine einfache Automation ohne Blueprint möchte:
 
 ## Ausprobieren
 
-Damit du nicht bis morgen früh warten musst: Stell im Blueprint das Zeitfenster
-kurz so ein, dass die aktuelle Uhrzeit darin liegt, schalte die Alarmanlage
-scharf und wieder unscharf – die Kaffeemaschine sollte angehen. Danach das
-Zeitfenster wieder auf 05:00 bis 09:00 Uhr zurückstellen.
+Damit du nicht bis morgen früh warten musst: Stell das Zeitfenster der
+Automation kurz so ein, dass die aktuelle Uhrzeit darin liegt. Schalte die
+Alarmanlage scharf, warte, bis sie wirklich scharf ist (Ausgangsverzögerung
+vorbei), und schalte sie wieder unscharf – die Kaffeemaschine sollte angehen.
+Danach das Zeitfenster wieder auf 05:00 bis 09:00 Uhr zurückstellen.
 
 Warum die Automation (nicht) gelaufen ist, zeigt ihre **Ablaufverfolgung**
 (Automation öffnen → Menü ⋮ → Ablaufverfolgung).
