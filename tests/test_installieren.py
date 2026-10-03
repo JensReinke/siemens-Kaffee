@@ -6,6 +6,7 @@ dagegen laufen – mit Token und mit Benutzername/Passwort.
 """
 
 import os
+import re
 import sys
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import datetime
@@ -83,7 +84,7 @@ class HomeConnectSchalter(SwitchEntity):
 
 
 Geraete = dict[str, tuple[str, list[str]]]
-HomeConnectEinrichten = Callable[[Geraete], Awaitable[None]]
+HomeConnectEinrichten = Callable[[Geraete], Awaitable[MockConfigEntry]]
 
 
 @pytest.fixture
@@ -97,12 +98,12 @@ def home_connect(hass: HomeAssistant) -> Iterator[HomeConnectEinrichten]:
         yield partial(home_connect_einrichten, hass)
 
 
-async def home_connect_einrichten(hass: HomeAssistant, geraete: Geraete) -> None:
+async def home_connect_einrichten(hass: HomeAssistant, geraete: Geraete) -> MockConfigEntry:
     """Spielt Home Connect nach: Gerätename → (Modell, weitere Entitäten des Geräts).
 
     Jedes Gerät bekommt wie in echt die Schalter „Einschalter“ und
     „Kindersicherung“; die weiteren Entitäten (z. B. ein Kaffeezähler) stehen
-    nur im Entitätsregister.
+    nur im Entitätsregister. Gibt den Konfigurationseintrag zurück.
     """
 
     async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -151,6 +152,7 @@ async def home_connect_einrichten(hass: HomeAssistant, geraete: Geraete) -> None
                 device_id=geraete_eintrag.id,
                 suggested_object_id=objekt_id,
             )
+    return eintrag
 
 
 KAFFEEVOLLAUTOMAT = {"Kaffeevollautomat": ("TQ903D03", ["sensor.kaffeevollautomat_coffee_counter"])}
@@ -602,15 +604,16 @@ async def test_rueckfragen_im_terminal(
         "binary_sensor.openccu_alarmzone_1", "off", {"friendly_name": "OpenCCU Alarmzone 1"}
     )
     home_assistant.states.async_set(SYSTEMVARIABLE, "Unscharf", {"friendly_name": "OpenCCU Alarmanlage"})
-    # Antworten: Nr. 2 aus der Liste, dann Enter für den vorgeschlagenen aktuellen Zustand.
+    # Antworten: Nr. 1 aus der Liste, dann Enter für den vorgeschlagenen aktuellen Zustand.
     with (
         patch.object(sys.stdin, "isatty", return_value=True),
-        patch("builtins.input", side_effect=["2", ""]),
+        patch("builtins.input", side_effect=["1", ""]),
     ):
         code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
     assert code == 0, fehler
-    assert "1) binary_sensor.openccu_alarmzone_1" in ausgabe
-    assert f"2) {SYSTEMVARIABLE}" in ausgabe
+    # „Alarmanlage“ klingt eher nach dem Scharf-Zustand als „Alarmzone“ und steht oben.
+    assert f"1) {SYSTEMVARIABLE}" in ausgabe
+    assert "2) binary_sensor.openccu_alarmzone_1" in ausgabe
     assert "Welcher Zustand bedeutet „unscharf“? Aktuell: „Unscharf“" in ausgabe
     assert f"✓ Alarmanlage: {SYSTEMVARIABLE} („OpenCCU Alarmanlage“), unscharf = „Unscharf“" in ausgabe
     [automation] = gespeicherte_automationen(home_assistant)
@@ -647,6 +650,131 @@ async def test_moegliche_zustaende_werden_genannt(
     assert code == 1
     assert f"Aktuell: „{zustand}“, möglich: {moeglich}." in fehler
     assert "--unscharf" in fehler
+
+
+# --- Homematic-CCU: Hüllschutz und Vollschutz als zwei Systemvariablen ----------
+
+INTERN = "binary_sensor.raspberrymatic_alarm_intern_scharf"
+EXTERN = "binary_sensor.raspberrymatic_alarm_extern_scharf"
+
+
+@pytest.fixture
+async def raspberrymatic(home_assistant: HomeAssistant) -> None:
+    """Eine CCU mit zwei Scharf-Variablen und viel Beiwerk, das nach „Alarm“ klingt."""
+    home_assistant.states.async_remove(ALARMANLAGE)
+    for entity_id, zustand, name in (
+        (INTERN, "off", "RaspberryMatic Alarm Intern scharf"),
+        (EXTERN, "off", "RaspberryMatic Alarm Extern scharf"),
+        ("binary_sensor.openccu_alarmzone_1", "off", "OpenCCU Alarmzone 1"),
+        ("binary_sensor.wz_rauchmelder_einbruchalarm", "off", "WZ Rauchmelder Einbruchalarm"),
+        ("binary_sensor.handsender_1_alarm_batterie", "off", "Handsender 1 Alarm Batterie"),
+        ("binary_sensor.wassersensor_wm_alarmzustand", "off", "Wassersensor WM Alarmzustand"),
+        ("sensor.raspberrymatic_alarmmeldungen", "0", "RaspberryMatic Alarmmeldungen"),
+    ):
+        home_assistant.states.async_set(entity_id, zustand, {"friendly_name": name})
+
+
+@pytest.mark.usefixtures("kaffeemaschine", "raspberrymatic")
+async def test_beiwerk_wird_ausgeblendet_und_treffer_sortiert(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rauchmelder, Batterie, Wasser und Meldungszähler fliegen raus; „scharf“ steht oben."""
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 1
+    zeilen = [zeile.strip() for zeile in fehler.splitlines() if re.match(r"\s*\d+\) ", zeile)]
+    assert zeilen[0].startswith(f"1) {EXTERN}")
+    assert zeilen[1].startswith(f"2) {INTERN}")
+    assert zeilen[2].startswith("3) binary_sensor.openccu_alarmzone_1")
+    assert len(zeilen) == 3
+    assert "rauchmelder" not in fehler and "batterie" not in fehler
+    assert "wassersensor" not in fehler and "alarmmeldungen" not in fehler
+    assert "--alarmanlage <entity_id> angeben, welche gemeint ist (mehrfach möglich)" in fehler
+
+
+@pytest.mark.usefixtures("kaffeemaschine", "raspberrymatic")
+async def test_zwei_systemvariablen_fuer_huell_und_vollschutz(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    freezer: FrozenDateTimeFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token,
+        "--alarmanlage", INTERN, "--alarmanlage", EXTERN, "--unscharf", "off",
+    )
+    assert code == 0, fehler
+    assert (
+        f"✓ Alarmanlage: {INTERN} („RaspberryMatic Alarm Intern scharf“), "
+        f"{EXTERN} („RaspberryMatic Alarm Extern scharf“), unscharf = „off“"
+    ) in ausgabe
+    [automation] = gespeicherte_automationen(home_assistant)
+    assert automation["triggers"][0]["entity_id"] == [INTERN, EXTERN]
+    assert automation["triggers"][0]["to"] == "off"
+
+    # Nachts Hüllschutz (intern) scharf, morgens unscharf → Kaffee.
+    freezer.move_to(um("23:00:00", "2026-10-04"))
+    home_assistant.states.async_set(INTERN, "on")
+    freezer.move_to(um("06:30:00"))
+    home_assistant.states.async_set(INTERN, "off")
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
+
+
+@pytest.mark.usefixtures("kaffeemaschine", "raspberrymatic")
+async def test_mehrere_im_terminal_waehlen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Im Terminal lassen sich mehrere Entitäten wählen („1,2“) und der Zustand per Nummer."""
+    with (
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=["1, 2", "1"]),
+    ):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert "welche sind gemeint? (mehrere möglich)" in ausgabe
+    assert "1) off" in ausgabe and "2) on" in ausgabe
+    [automation] = gespeicherte_automationen(home_assistant)
+    assert automation["triggers"][0]["entity_id"] == [EXTERN, INTERN]
+    assert automation["triggers"][0]["to"] == "off"
+
+
+async def test_deaktivierte_entitaeten_werden_genannt(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Deaktivierte Entitäten (so legt Homematic(IP) Local Systemvariablen an) werden genannt."""
+    home_assistant.states.async_remove(ALARMANLAGE)
+    eintrag = await home_connect(KAFFEEVOLLAUTOMAT)
+    # Stellvertretend für die CCU hängt die deaktivierte Variable am Home-Connect-Gerät.
+    geraet = dr.async_get(home_assistant).async_get_device_by_identifier(
+        (HOME_CONNECT, "Kaffeevollautomat"), eintrag.entry_id
+    )
+    er.async_get(home_assistant).async_get_or_create(
+        "binary_sensor",
+        HOME_CONNECT,
+        "sysvar-alarm-intern",
+        config_entry=eintrag,
+        device_id=geraet.id,
+        suggested_object_id="raspberrymatic_alarm_intern_scharf",
+        disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+    )
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 1
+    assert "Keine Alarmanlage in Home Assistant gefunden" in fehler
+    assert "sie sind aber deaktiviert" in fehler
+    assert f"    {INTERN}\n" in fehler
+    assert "„Deaktivierte Entitäten anzeigen“" in fehler and "„hahm“" in fehler
+    assert "switch.kaffeevollautomat" not in fehler
 
 
 # --- Kleinkram ---------------------------------------------------------------

@@ -25,9 +25,11 @@ blueprint:
         Die Alarmzentrale, deren Unscharfschalten die Kaffeemaschine einschalten
         soll – oder eine andere Entität, die den Zustand der Alarmanlage meldet,
         z. B. eine Systemvariable der Homematic-CCU (OpenCCU). Dann unten den
-        Zustand „unscharf“ anpassen.
+        Zustand „unscharf“ anpassen. Mehrere sind möglich, z. B. je eine
+        Variable für Hüllschutz und Vollschutz.
       selector:
         entity:
+          multiple: true
           filter:
             - domain:
                 - alarm_control_panel
