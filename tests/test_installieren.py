@@ -30,6 +30,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.setup import async_setup_component
+from homeassistant.util import slugify
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     MockModule,
@@ -115,6 +116,7 @@ async def home_connect_einrichten(
     geraete: Geraete,
     variablen: dict[str, bool] | None = None,
     deaktiviert: set[str] = frozenset(),
+    deaktivierte_schalter: set[tuple[str, str]] = frozenset(),
 ) -> MockConfigEntry:
     """Spielt Home Connect nach: Gerätename → (Modell, weitere Entitäten des Geräts).
 
@@ -122,7 +124,9 @@ async def home_connect_einrichten(
     „Kindersicherung“; die weiteren Entitäten (z. B. ein Kaffeezähler) stehen
     nur im Entitätsregister. ``variablen`` (Name → an?) legt stellvertretend für
     CCU-Systemvariablen Binärsensoren an, die in ``deaktiviert`` von Anfang an
-    deaktiviert sind. Gibt den Konfigurationseintrag zurück.
+    deaktiviert sind; ``deaktivierte_schalter`` (Gerät, Schaltername) sind
+    Schalter, die von Anfang an deaktiviert sind. Gibt den Konfigurationseintrag
+    zurück.
     """
     plattformen = ["switch", "binary_sensor"]
 
@@ -164,16 +168,34 @@ async def home_connect_einrichten(
     )
     eintrag = MockConfigEntry(domain=HOME_CONNECT, title="Home Connect")
     eintrag.add_to_hass(hass)
+    # Schon vor dem Laden im Register als deaktiviert eingetragen – so bekommt
+    # die Entität keinen Zustand, genau wie eine frisch importierte Systemvariable.
     for name in deaktiviert:
-        # Schon vor dem Laden im Register als deaktiviert eingetragen – so bekommt
-        # die Entität keinen Zustand, genau wie eine frisch importierte Systemvariable.
         er.async_get(hass).async_get_or_create(
             "binary_sensor",
             HOME_CONNECT,
             f"sysvar-{name}",
             config_entry=eintrag,
-            suggested_object_id=f"raspberrymatic_{name}",
+            suggested_object_id=slugify(f"raspberrymatic {name}"),
             disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+        )
+    for geraet, name in deaktivierte_schalter:
+        # Wie in echt hängt der (vom Benutzer deaktivierte) Schalter schon am Gerät.
+        geraete_eintrag = dr.async_get(hass).async_get_or_create(
+            config_entry_id=eintrag.entry_id,
+            identifiers={(HOME_CONNECT, geraet)},
+            name=geraet,
+            manufacturer="SIEMENS",
+            model=geraete[geraet][0],
+        )
+        er.async_get(hass).async_get_or_create(
+            "switch",
+            HOME_CONNECT,
+            f"{geraet}-{name}",
+            config_entry=eintrag,
+            device_id=geraete_eintrag.id,
+            suggested_object_id=slugify(f"{geraet} {name}"),
+            disabled_by=er.RegistryEntryDisabler.USER,
         )
     assert await hass.config_entries.async_setup(eintrag.entry_id)
     await hass.async_block_till_done()
@@ -544,7 +566,67 @@ async def test_keine_kaffeemaschine(
     assert code == 1
     assert "Keine den Einschalter" not in fehler  # Grammatik stimmt
     assert "Kein Einschalter der Kaffeemaschine in Home Assistant gefunden" in fehler
-    assert "Home Connect" in fehler and "--kaffeemaschine <entity_id>" in fehler
+    assert "kein Gerät der Integration „Home Connect“ eingebunden" in fehler
+    assert installieren.HOME_CONNECT_ANLEITUNG in fehler
+    assert "--kaffeemaschine <entity_id>" in fehler
+
+
+async def test_deaktivierter_einschalter_wird_aktiviert(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ist der Einschalter der Kaffeemaschine deaktiviert, nennt das Skript ihn bzw. aktiviert ihn."""
+    await home_connect(
+        {**KAFFEEVOLLAUTOMAT, **GESCHIRRSPUELER_GERAET},
+        deaktivierte_schalter={("Kaffeevollautomat", "Einschalter")},
+    )
+    assert home_assistant.states.get(KAFFEEMASCHINE) is None
+    assert home_assistant.states.get("switch.kaffeevollautomat_kindersicherung").state == "off"
+
+    # Ohne Terminal: Hinweis statt Rückfrage – die Kindersicherung wird nicht angeboten.
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 1, ausgabe + fehler
+    assert "Kein Einschalter der Kaffeemaschine in Home Assistant gefunden" in fehler
+    assert f"    {KAFFEEMASCHINE}\n" in fehler
+    assert "--kaffeemaschine <entity_id> angegeben, aktiviert dieses Skript sie selbst" in fehler
+    assert "kindersicherung" not in fehler
+
+    # Im Terminal: Angebot, den Schalter zu aktivieren.
+    with (
+        sofort_neuladen(),
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=["1"]),
+    ):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert "aktivieren und als Einschalter der Kaffeemaschine verwenden?" in ausgabe
+    assert f"✓ {KAFFEEMASCHINE} aktiviert" in ausgabe
+    assert f"✓ Kaffeemaschine: {KAFFEEMASCHINE}" in ausgabe
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"
+    [automation] = gespeicherte_automationen(home_assistant)
+    assert automation["actions"][0]["target"]["entity_id"] == KAFFEEMASCHINE
+
+
+async def test_angegebener_deaktivierter_einschalter_wird_aktiviert(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    await home_connect(KAFFEEVOLLAUTOMAT, deaktivierte_schalter={("Kaffeevollautomat", "Einschalter")})
+    with sofort_neuladen():
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token,
+            "--kaffeemaschine", KAFFEEMASCHINE, "--probelauf",
+        )
+    assert code == 0, fehler
+    assert f"{KAFFEEMASCHINE} ist deaktiviert – wird aktiviert." in ausgabe
+    assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
 
 
 @pytest.mark.usefixtures("kaffeemaschine")
