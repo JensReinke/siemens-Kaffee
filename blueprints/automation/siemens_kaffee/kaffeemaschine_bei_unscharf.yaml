@@ -1,0 +1,134 @@
+blueprint:
+  name: Kaffeemaschine an, wenn die Alarmanlage morgens unscharf geschaltet wird
+  description: >-
+    Schaltet den Siemens-Kaffeevollautomaten (Home Connect) automatisch ein,
+    sobald die Alarmanlage im gewählten Zeitfenster – standardmäßig
+    **05:00 bis 09:00 Uhr** – unscharf geschaltet wird.
+
+
+    - Reagiert nur auf echtes Unscharfschalten, nicht auf einen Neustart von
+      Home Assistant oder einen abgebrochenen Scharfschaltvorgang.
+
+    - Ist die Kaffeemaschine schon an, passiert nichts.
+
+
+    Voraussetzung: Die Kaffeemaschine ist über die Home-Connect-Integration in
+    Home Assistant eingebunden.
+  domain: automation
+  source_url: https://github.com/JensReinke/siemens-Kaffee/blob/HEAD/blueprints/automation/siemens_kaffee/kaffeemaschine_bei_unscharf.yaml
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    alarmanlage:
+      name: Alarmanlage
+      description: Die Alarmzentrale, deren Unscharfschalten die Kaffeemaschine einschalten soll.
+      selector:
+        entity:
+          filter:
+            - domain: alarm_control_panel
+    kaffeemaschine:
+      name: Kaffeemaschine
+      description: >-
+        Der Schalter „Einschalter“ (englisch „Power“) des Kaffeevollautomaten
+        aus der Home-Connect-Integration, z. B.
+        `switch.kaffeevollautomat_einschalter` oder
+        `switch.kaffeevollautomat_power`.
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    zeitfenster:
+      name: Zeitfenster
+      icon: mdi:clock-outline
+      input:
+        zeit_von:
+          name: Von
+          description: Ab dieser Uhrzeit schaltet das Unscharfschalten die Kaffeemaschine ein.
+          default: "05:00:00"
+          selector:
+            time: {}
+        zeit_bis:
+          name: Bis
+          description: >-
+            Bis zu dieser Uhrzeit (ausschließlich) – bei 09:00 also
+            bis 08:59:59 Uhr.
+          default: "09:00:00"
+          selector:
+            time: {}
+        wochentage:
+          name: Wochentage
+          description: An diesen Tagen ist die Automation aktiv.
+          default: [mon, tue, wed, thu, fri, sat, sun]
+          selector:
+            select:
+              multiple: true
+              mode: list
+              options:
+                - label: Montag
+                  value: mon
+                - label: Dienstag
+                  value: tue
+                - label: Mittwoch
+                  value: wed
+                - label: Donnerstag
+                  value: thu
+                - label: Freitag
+                  value: fri
+                - label: Samstag
+                  value: sat
+                - label: Sonntag
+                  value: sun
+    erweitert:
+      name: Erweitert (optional)
+      icon: mdi:tune
+      collapsed: true
+      input:
+        zusaetzliche_bedingungen:
+          name: Zusätzliche Bedingungen
+          description: >-
+            Alle hier eingetragenen Bedingungen müssen ebenfalls erfüllt sein,
+            z. B. „jemand ist zu Hause“.
+          default: []
+          selector:
+            condition: {}
+        zusaetzliche_aktionen:
+          name: Zusätzliche Aktionen
+          description: >-
+            Werden nach dem Einschalten ausgeführt, z. B. eine Benachrichtigung
+            aufs Handy.
+          default: []
+          selector:
+            action: {}
+
+mode: single
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input alarmanlage
+    to: disarmed
+    # Nicht reagieren, wenn die Alarmanlage nach einem Neustart wieder
+    # erreichbar wird oder ein Scharfschaltvorgang abgebrochen wurde.
+    not_from:
+      - unavailable
+      - unknown
+      - arming
+
+conditions:
+  - condition: time
+    after: !input zeit_von
+    before: !input zeit_bis
+    weekday: !input wochentage
+  - condition: not
+    conditions:
+      - condition: state
+        entity_id: !input kaffeemaschine
+        state: "on"
+  - condition: and
+    conditions: !input zusaetzliche_bedingungen
+
+actions:
+  - action: switch.turn_on
+    target:
+      entity_id: !input kaffeemaschine
+  - sequence: !input zusaetzliche_aktionen

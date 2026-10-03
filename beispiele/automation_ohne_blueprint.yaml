@@ -1,0 +1,33 @@
+# Dieselbe Automation ohne Blueprint – zum direkten Einfügen in Home Assistant:
+# Einstellungen → Automationen & Szenen → Automation erstellen → Neue Automation
+# erstellen → Menü (⋮) → „In YAML bearbeiten“ → diesen Inhalt einfügen →
+# die mit „<- anpassen“ markierten Entitäts-IDs ändern → Speichern.
+alias: Kaffeemaschine an, wenn die Alarmanlage morgens unscharf geschaltet wird
+description: >-
+  Schaltet den Siemens-Kaffeevollautomaten ein, wenn die Alarmanlage zwischen
+  05:00 und 09:00 Uhr unscharf geschaltet wird.
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: state
+    entity_id: alarm_control_panel.alarmanlage  # <- anpassen
+    to: disarmed
+    # Nicht reagieren, wenn die Alarmanlage nach einem Neustart wieder
+    # erreichbar wird oder ein Scharfschaltvorgang abgebrochen wurde.
+    not_from:
+      - unavailable
+      - unknown
+      - arming
+conditions:
+  - condition: time
+    after: "05:00:00"
+    before: "09:00:00"
+  - condition: not
+    conditions:
+      - condition: state
+        entity_id: switch.kaffeevollautomat_einschalter  # <- anpassen
+        state: "on"
+actions:
+  - action: switch.turn_on
+    target:
+      entity_id: switch.kaffeevollautomat_einschalter  # <- anpassen

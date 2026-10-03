@@ -1,0 +1,2 @@
+# Startet in den Tests ein echtes Home Assistant (hier: 2026.9.4).
+pytest-homeassistant-custom-component==0.13.367
