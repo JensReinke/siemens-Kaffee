@@ -71,52 +71,28 @@ ALARM_STARK = re.compile(
     re.IGNORECASE,
 )
 
-# Alle Entitäten aus dem Register von Home Assistant – auch deaktivierte, die
-# keinen Zustand haben. Homematic(IP) Local legt Systemvariablen der CCU so an.
-# Der Weg führt über die Titel der Konfigurationseinträge, weil
-# integration_entities() nur dafür auch deaktivierte Entitäten liefert.
-REGISTER_TEMPLATE = """
-{%- set ns = namespace(eintraege=[]) -%}
-{%- for zustand in states -%}
-  {%- set geraet = device_id(zustand.entity_id) -%}
-  {%- if geraet -%}
-    {%- for eintrag in device_attr(geraet, 'config_entries') or [] -%}
-      {%- set ns.eintraege = ns.eintraege + [eintrag] -%}
-    {%- endfor -%}
-  {%- endif -%}
-{%- endfor -%}
-{%- set ns2 = namespace(ids=[]) -%}
-{%- for eintrag in ns.eintraege | unique -%}
-  {%- set ns2.ids = ns2.ids + (integration_entities(config_entry_attr(eintrag, 'title')) | list) -%}
-{%- endfor -%}
-{{ ns2.ids | unique | list | to_json }}
-"""
 
 # Woran man den „Einschalter“ (englisch „Power“) eines Home-Connect-Geräts
 # und eine Kaffeemaschine erkennt – an Entitäts-IDs, Namen und Modell.
-EINSCHALTER = re.compile(r"(^|[_ ])(power|einschalter)$", re.IGNORECASE)
+EINSCHALTER = re.compile(r"(^|[_ ])(power|power_?state|einschalter)$", re.IGNORECASE)
 KAFFEEMASCHINE = re.compile(
     r"kaffee|coffee|espresso|cappuccino|latte|bean|bohne|milk|milch|drip_tray"
     r"|tropfschale|hot_water|heisswasser|heißwasser|vollautomat|\beq\b|eq[._ ]?\d",
     re.IGNORECASE,
 )
 
-# Liefert alle Home-Connect-Geräte mit Namen, Hersteller, Modell und ihren
-# Entitäten – als JSON, gerendert von Home Assistant selbst.
-GERAETE_TEMPLATE = """
-{%- set ns = namespace(geraete=[]) -%}
-{%- for geraet in integration_entities('home_connect')
-      | map('device_id') | reject('none') | unique -%}
-  {%- set ns.geraete = ns.geraete + [{
-        'name': device_attr(geraet, 'name_by_user') or device_attr(geraet, 'name'),
-        'original_name': device_attr(geraet, 'name'),
-        'hersteller': device_attr(geraet, 'manufacturer'),
-        'modell': device_attr(geraet, 'model'),
-        'entitaeten': device_entities(geraet),
-      }] -%}
-{%- endfor -%}
-{{ ns.geraete | to_json }}
-"""
+# Integrationen, über die Hausgeräte von Siemens/Bosch in Home Assistant kommen.
+HOME_CONNECT_DOMAINS = ("home_connect", "home_connect_alt")
+HAUSGERAETE = re.compile(r"siemens|bosch|bsh|neff|gaggenau|home ?connect", re.IGNORECASE)
+EINTRAGSZUSTAENDE = {
+    "loaded": "geladen",
+    "not_loaded": "nicht geladen",
+    "setup_error": "Fehler beim Einrichten",
+    "setup_retry": "Einrichten fehlgeschlagen, wird wiederholt",
+    "setup_in_progress": "wird gerade eingerichtet",
+    "migration_error": "Fehler bei der Migration",
+    "failed_unload": "Entladen fehlgeschlagen",
+}
 
 
 class Abbruch(Exception):
@@ -196,6 +172,13 @@ class HomeAssistant:
     def __init__(self, url: str, token: Optional[str] = None) -> None:
         self.url = url
         self.token = token
+        self._register: Optional[Register] = None
+
+    def register(self) -> "Register":
+        """Die Register von Home Assistant – werden beim ersten Zugriff geholt."""
+        if self._register is None:
+            self._register = Register(self)
+        return self._register
 
     def anfrage(
         self,
@@ -345,100 +328,136 @@ def name_von(zustand: dict[str, Any]) -> str:
     return str(zustand.get("attributes", {}).get("friendly_name") or zustand["entity_id"])
 
 
-def ist_einschalter(entity_id: str, zustaende: dict[str, dict[str, Any]]) -> bool:
+def ist_einschalter(entity_id: str, name: str = "") -> bool:
     objekt_id = entity_id.split(".", 1)[1]
-    name = name_von(zustaende[entity_id]) if entity_id in zustaende else ""
     return bool(EINSCHALTER.search(objekt_id) or EINSCHALTER.search(name))
 
 
-def ist_kaffeemaschine(geraet: dict[str, Any]) -> bool:
-    merkmale = " ".join(
-        str(wert or "") for wert in (geraet["name"], geraet["modell"])
-    ) + " " + " ".join(geraet["entitaeten"])
-    return bool(KAFFEEMASCHINE.search(merkmale))
-
-
-def home_connect_geraete(ha: HomeAssistant) -> list[dict[str, Any]]:
-    status, text = ha.anfrage("POST", "/api/template", json_daten={"template": GERAETE_TEMPLATE})
-    if status >= 400:
-        raise Abbruch(f"Home Assistant konnte die Geräteliste nicht liefern: {fehlermeldung(text)}")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as fehler:
-        raise Abbruch(f"Unerwartete Geräteliste: {text[:200]}") from fehler
-
-
 def kandidaten_kaffeemaschine(
-    ha: HomeAssistant, zustaende: dict[str, dict[str, Any]]
+    register: "Register", zustaende: dict[str, dict[str, Any]]
 ) -> tuple[list[tuple[str, str]], list[str], str]:
     """Mögliche Einschalter der Kaffeemaschine.
 
     Gibt zurück: die auswählbaren Einschalter als (entity_id, Beschreibung),
-    deaktivierte Einschalter (ohne Zustand) und einen Hinweis für den Fall,
-    dass nichts auswählbar ist.
+    deaktivierte Einschalter und einen Hinweis für den Fall, dass nichts
+    auswählbar ist.
     """
-    geraete = home_connect_geraete(ha)
+    geraete = [g for g in register.geraete.values() if register.ist_kaffeemaschine(g)]
     if not geraete:
-        # Kein Home Connect: Nach Schaltern suchen, die wie der Einschalter einer
-        # Kaffeemaschine heißen.
+        # Keine Kaffeemaschine erkannt – dann alle Home-Connect-Geräte anbieten.
+        geraete = [g for g in register.geraete.values() if register.ist_home_connect(g)]
+    if not geraete:
+        # Gar kein Hausgerät: Nach Schaltern suchen, die wie der Einschalter
+        # einer Kaffeemaschine heißen.
         kandidaten = [
             (entity_id, f"„{name_von(zustand)}“")
             for entity_id, zustand in sorted(zustaende.items())
             if entity_id.startswith("switch.")
-            and ist_einschalter(entity_id, zustaende)
+            and ist_einschalter(entity_id, name_von(zustand))
             and (KAFFEEMASCHINE.search(entity_id) or KAFFEEMASCHINE.search(name_von(zustand)))
         ]
-        return kandidaten, [], (
-            "In Home Assistant ist kein Gerät der Integration „Home Connect“ eingebunden. "
-            "Darüber muss die Kaffeemaschine verbunden sein – Anleitung: " + HOME_CONNECT_ANLEITUNG
+        return kandidaten, [], diagnose(register, zustaende)
+
+    kandidaten: list[tuple[str, str]] = []
+    deaktiviert: list[str] = []
+    for geraet in geraete:
+        hersteller_modell = " ".join(
+            str(w) for w in (geraet.get("manufacturer"), geraet.get("model")) if w
+        ) or register.geraetename(geraet)
+        schalter = [e for e in register.entitaeten_von(geraet) if e["entity_id"].startswith("switch.")]
+        # Heißt kein Schalter „Einschalter“, kommen alle Schalter des Geräts infrage.
+        einschalter = [
+            e for e in schalter if ist_einschalter(e["entity_id"], register.entitaetsname(e))
+        ] or schalter
+        for entitaet in einschalter:
+            entity_id = entitaet["entity_id"]
+            if verfuegbar(entity_id, zustaende):
+                kandidaten.append((entity_id, f"„{name_von(zustaende[entity_id])}“, {hersteller_modell}"))
+            elif entitaet.get("disabled_by"):
+                deaktiviert.append(entity_id)
+            # Sonst: aktiv, aber nicht verfügbar (Integration nicht geladen, Gerät
+            # offline) – steht in der Diagnose.
+    return kandidaten, sorted(deaktiviert), diagnose(register, zustaende)
+
+
+def verfuegbar(entity_id: str, zustaende: dict[str, dict[str, Any]]) -> bool:
+    """Hat die Entität einen Zustand, und ist er nicht „unavailable“?"""
+    return zustaende.get(entity_id, {}).get("state", "unavailable") != "unavailable"
+
+
+def diagnose(register: "Register", zustaende: dict[str, dict[str, Any]]) -> str:
+    """Was Home Assistant über Home Connect und Hausgeräte weiß – für die Fehlersuche."""
+    zeilen = []
+    eintraege = [e for e in register.eintraege.values() if e.get("domain") in HOME_CONNECT_DOMAINS]
+    if not eintraege:
+        zeilen.append(
+            "Die Integration „Home Connect“ ist in Home Assistant nicht eingerichtet – darüber "
+            "muss die Kaffeemaschine verbunden sein. Anleitung: " + HOME_CONNECT_ANLEITUNG
         )
-    kaffeemaschinen = [g for g in geraete if ist_kaffeemaschine(g)] or geraete
-
-    def beschreibung(geraet: dict[str, Any], entity_id: str) -> tuple[str, str]:
-        hersteller_modell = " ".join(str(w) for w in (geraet["hersteller"], geraet["modell"]) if w)
-        return entity_id, f"„{name_von(zustaende[entity_id])}“, {hersteller_modell or geraet['name']}"
-
-    # device_entities() liefert nur aktive Entitäten – deaktivierte Einschalter
-    # stehen nur im Register und werden am Gerätenamen vorn in der ID erkannt.
-    praefixe = {
-        f"switch.{slug(str(name))}_"
-        for geraet in kaffeemaschinen
-        for name in (geraet["name"], geraet.get("original_name"))
-        if name
-    }
-    kandidaten = [
-        beschreibung(geraet, entity_id)
-        for geraet in kaffeemaschinen
-        for entity_id in geraet["entitaeten"]
-        if entity_id.startswith("switch.") and ist_einschalter(entity_id, zustaende)
-    ]
-    deaktiviert = sorted(
-        entity_id
-        for entity_id in set(register_entitaeten(ha))
-        if entity_id not in zustaende
-        and entity_id.startswith("switch.")
-        and ist_einschalter(entity_id, zustaende)
-        and (any(entity_id.startswith(p) for p in praefixe) or KAFFEEMASCHINE.search(entity_id))
-    )
-    if not kandidaten and not deaktiviert:
-        # Kein Schalter heißt „Einschalter“: alle Schalter der Kaffeemaschinen anbieten.
-        kandidaten = [
-            beschreibung(geraet, entity_id)
-            for geraet in kaffeemaschinen
-            for entity_id in geraet["entitaeten"]
-            if entity_id.startswith("switch.")
+    for eintrag in eintraege:
+        zustand = str(eintrag.get("state"))
+        zeile = (
+            f"Integration „{eintrag.get('title')}“ ({eintrag.get('domain')}): "
+            f"{'deaktiviert' if eintrag.get('disabled_by') else EINTRAGSZUSTAENDE.get(zustand, zustand)}"
+        )
+        if eintrag.get("reason"):
+            zeile += f" – {eintrag['reason']}"
+        if zustand != "loaded":
+            zeile += (
+                ". → In Home Assistant unter Einstellungen → Geräte & Dienste die Integration "
+                "neu laden bzw. der Aufforderung zur erneuten Anmeldung folgen."
+            )
+        zeilen.append(zeile)
+    for geraet in register.geraete.values():
+        if not (
+            register.ist_kaffeemaschine(geraet)
+            or HAUSGERAETE.search(f"{geraet.get('manufacturer')} {geraet.get('model')}")
+        ):
+            continue
+        entitaeten = register.entitaeten_von(geraet)
+        deaktiviert = [e for e in entitaeten if e.get("disabled_by")]
+        nicht_verfuegbar = [
+            e for e in entitaeten
+            if not e.get("disabled_by") and not verfuegbar(e["entity_id"], zustaende)
         ]
-    namen = ", ".join(str(geraet["name"]) for geraet in geraete)
-    return kandidaten, deaktiviert, (
-        f"Home Connect ist eingebunden (Geräte: {namen}), aber kein Schalter davon ist aktiv."
-    )
+        schalter = [
+            e["entity_id"]
+            + (" (deaktiviert)" if e in deaktiviert else " (nicht verfügbar)" if e in nicht_verfuegbar else "")
+            for e in entitaeten
+            if e["entity_id"].startswith("switch.")
+        ]
+        integrationen = ", ".join(sorted({str(e.get("domain")) for e in register.integrationen_von(geraet)}))
+        zeilen.append(
+            f"Gerät „{register.geraetename(geraet)}“ ({geraet.get('manufacturer')} {geraet.get('model')}, "
+            f"Integration: {integrationen or '?'}): {len(entitaeten)} Entitäten, "
+            f"{len(deaktiviert)} deaktiviert, {len(nicht_verfuegbar)} nicht verfügbar; "
+            f"Schalter: {', '.join(schalter) or 'keine'}"
+        )
+    return "\n  ".join(zeilen)
 
 
-def slug(text: str) -> str:
-    """Wie Home Assistant aus einem Namen den Anfang der Entitäts-ID macht („Geschirrspüler“ → „geschirrspuler“)."""
-    for von, nach in (("ä", "a"), ("ö", "o"), ("ü", "u"), ("ß", "ss")):
-        text = text.lower().replace(von, nach)
-    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+def diagnose_ausfuehrlich(register: "Register", zustaende: dict[str, dict[str, Any]]) -> str:
+    """Die Diagnose plus alle Entitäten der Hausgeräte – zum Weitergeben bei Problemen."""
+    zeilen = ["Diagnose:", "  " + diagnose(register, zustaende)]
+    for geraet in register.geraete.values():
+        if not (
+            register.ist_kaffeemaschine(geraet)
+            or HAUSGERAETE.search(f"{geraet.get('manufacturer')} {geraet.get('model')}")
+        ):
+            continue
+        zeilen.append(f"\nEntitäten von „{register.geraetename(geraet)}“:")
+        for entitaet in register.entitaeten_von(geraet):
+            entity_id = entitaet["entity_id"]
+            if entitaet.get("disabled_by"):
+                status = f"deaktiviert ({entitaet['disabled_by']})"
+            elif entity_id in zustaende:
+                status = f"Zustand: {zustaende[entity_id]['state']}"
+            else:
+                status = "nicht verfügbar (kein Zustand)"
+            zeilen.append(
+                f"  {entity_id}  „{register.entitaetsname(entitaet)}“  [{entitaet.get('platform')}]  {status}"
+            )
+    return "\n".join(zeilen)
 
 
 def alarm_treffer(entity_id: str, name: str = "") -> int:
@@ -473,30 +492,17 @@ def kandidaten_alarmanlage(zustaende: dict[str, dict[str, Any]]) -> list[tuple[s
     ]
 
 
-def register_entitaeten(ha: HomeAssistant) -> list[str]:
-    """Alle Entitäten laut Register von Home Assistant – auch deaktivierte ohne Zustand."""
-    status, text = ha.anfrage("POST", "/api/template", json_daten={"template": REGISTER_TEMPLATE})
-    if status >= 400:
-        return []  # z. B. ältere Home-Assistant-Version ohne config_entry_attr
-    try:
-        return list(json.loads(text))
-    except json.JSONDecodeError:
-        return []
+def deaktivierte_alarm_entitaeten(register: "Register") -> list[str]:
+    """Deaktivierte Entitäten, die nach Alarmanlage klingen.
 
-
-def deaktivierte_alarm_entitaeten(
-    ha: HomeAssistant, zustaende: dict[str, dict[str, Any]]
-) -> list[str]:
-    """Entitäten, die nach Alarmanlage klingen, aber keinen Zustand haben.
-
-    Das sind deaktivierte Entitäten – Homematic(IP) Local legt Systemvariablen
-    der CCU standardmäßig so an – oder solche einer gerade nicht geladenen
-    Integration. Auswählen kann man sie erst, wenn sie aktiv sind.
+    Homematic(IP) Local legt Systemvariablen der CCU standardmäßig so an.
+    Auswählen kann man sie erst, wenn sie aktiv sind.
     """
     return sorted(
-        entity_id
-        for entity_id in set(register_entitaeten(ha))
-        if entity_id not in zustaende and alarm_treffer(entity_id)
+        entitaet["entity_id"]
+        for entitaet in register.entitaeten.values()
+        if entitaet.get("disabled_by")
+        and alarm_treffer(entitaet["entity_id"], register.entitaetsname(entitaet))
     )
 
 
@@ -641,6 +647,62 @@ class WebSocket:
             self.sock.close()
 
 
+class Register:
+    """Integrationen, Geräte und Entitäten aus den Registern von Home Assistant.
+
+    Kommt über die WebSocket-API, weil die REST-API weder deaktivierte Entitäten
+    noch Geräte noch den Zustand der Integrationen kennt.
+    """
+
+    def __init__(self, ha: HomeAssistant) -> None:
+        ws = WebSocket(ha.url, ha.token)
+        try:
+            self.eintraege: dict[str, dict[str, Any]] = {
+                e["entry_id"]: e for e in ws.befehl(type="config_entries/get")
+            }
+            self.geraete: dict[str, dict[str, Any]] = {
+                g["id"]: g for g in ws.befehl(type="config/device_registry/list")
+            }
+            self.entitaeten: dict[str, dict[str, Any]] = {
+                e["entity_id"]: e for e in ws.befehl(type="config/entity_registry/list")
+            }
+        finally:
+            ws.schliessen()
+        self._nach_geraet: dict[str, list[dict[str, Any]]] = {}
+        for entitaet in sorted(self.entitaeten.values(), key=lambda e: e["entity_id"]):
+            if entitaet.get("device_id"):
+                self._nach_geraet.setdefault(entitaet["device_id"], []).append(entitaet)
+
+    @staticmethod
+    def geraetename(geraet: dict[str, Any]) -> str:
+        return str(geraet.get("name_by_user") or geraet.get("name") or geraet["id"])
+
+    @staticmethod
+    def entitaetsname(entitaet: dict[str, Any]) -> str:
+        return str(entitaet.get("name") or entitaet.get("original_name") or "")
+
+    def entitaeten_von(self, geraet: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._nach_geraet.get(geraet["id"], [])
+
+    def integrationen_von(self, geraet: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            self.eintraege[eintrag_id]
+            for eintrag_id in geraet.get("config_entries") or []
+            if eintrag_id in self.eintraege
+        ]
+
+    def ist_home_connect(self, geraet: dict[str, Any]) -> bool:
+        return any(e.get("domain") in HOME_CONNECT_DOMAINS for e in self.integrationen_von(geraet))
+
+    def ist_kaffeemaschine(self, geraet: dict[str, Any]) -> bool:
+        """Erkennt eine Kaffeemaschine an Name, Modell oder ihren Entitäten (Bohnen, Kaffeezähler …)."""
+        merkmale = " ".join(
+            [str(geraet.get("name") or ""), self.geraetename(geraet), str(geraet.get("model") or "")]
+            + [f"{e['entity_id']} {self.entitaetsname(e)}" for e in self.entitaeten_von(geraet)]
+        )
+        return bool(KAFFEEMASCHINE.search(merkmale))
+
+
 def entitaet_aktivieren(ha: HomeAssistant, entity_id: str) -> None:
     """Aktiviert eine deaktivierte Entität – wie der Schalter „Aktiviert“ in ihren Einstellungen."""
     ws = WebSocket(ha.url, ha.token)
@@ -705,9 +767,17 @@ def entitaet_bereitstellen(
 ) -> str:
     """Prüft eine per Option angegebene Entität; ist sie nur deaktiviert, wird sie aktiviert."""
     domain_pruefen(entity_id, domains, option)
-    if entity_id not in zustaende and entity_id in register_entitaeten(ha):
-        print(f"  {entity_id} ist deaktiviert – wird aktiviert.")
-        aktivieren_und_warten(ha, [entity_id], zustaende)
+    if entity_id not in zustaende:
+        eintrag = ha.register().entitaeten.get(entity_id)
+        if eintrag and eintrag.get("disabled_by"):
+            print(f"  {entity_id} ist deaktiviert – wird aktiviert.")
+            aktivieren_und_warten(ha, [entity_id], zustaende)
+        elif eintrag:
+            raise Abbruch(
+                f"{entity_id} ist in Home Assistant registriert, meldet aber keinen Zustand – "
+                f"die Integration „{eintrag.get('platform')}“ ist wohl gerade nicht geladen. "
+                "Unter Einstellungen → Geräte & Dienste nachsehen."
+            )
     return entitaet_pruefen(entity_id, domains, zustaende, option)
 
 
@@ -979,6 +1049,11 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Nur zeigen, was eingerichtet würde – nichts ändern",
     )
     parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Nur ausgeben, was Home Assistant über Home Connect und Hausgeräte weiß – zur Fehlersuche",
+    )
+    parser.add_argument(
         "--probelauf",
         action="store_true",
         help="Nach dem Einrichten die Automation sofort auslösen – die Kaffeemaschine geht dann wirklich an",
@@ -1027,6 +1102,10 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
     print(f"✓ Home Assistant {info.get('version')} („{info.get('location_name')}“)")
 
     zustaende = {z["entity_id"]: z for z in ha.get_json("/api/states")}
+    if args.diagnose:
+        print(diagnose_ausfuehrlich(ha.register(), zustaende))
+        return 0
+
     if args.alarmanlage:
         alarmanlagen = [
             entitaet_bereitstellen(ha, anlage, zustaende, ALARM_DOMAINS, "--alarmanlage")
@@ -1040,7 +1119,7 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
         )
         alarmanlagen: list[str] = []
         if not any(entity_id.startswith("alarm_control_panel.") for entity_id, _ in kandidaten):
-            deaktiviert = deaktivierte_alarm_entitaeten(ha, zustaende)
+            deaktiviert = deaktivierte_alarm_entitaeten(ha.register())
             if deaktiviert:
                 hinweis = hinweis_deaktiviert(deaktiviert)
                 if interaktiv:
@@ -1067,7 +1146,7 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
             ha, args.kaffeemaschine, zustaende, ("switch",), "--kaffeemaschine"
         )
     else:
-        kandidaten, deaktiviert, hinweis = kandidaten_kaffeemaschine(ha, zustaende)
+        kandidaten, deaktiviert, hinweis = kandidaten_kaffeemaschine(ha.register(), zustaende)
         gewaehlt: list[str] = []
         if deaktiviert:
             hinweis = hinweis_deaktiviert(deaktiviert, "--kaffeemaschine")
@@ -1086,6 +1165,12 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
             )
         [kaffeemaschine] = gewaehlt
     print(f"✓ Kaffeemaschine: {kaffeemaschine} („{name_von(zustaende[kaffeemaschine])}“)")
+    if not verfuegbar(kaffeemaschine, zustaende):
+        print(
+            f"⚠ {kaffeemaschine} ist zurzeit nicht verfügbar – Home Assistant erreicht die Maschine "
+            "gerade nicht (Integration geladen? Maschine am Strom und im WLAN?). Die Automation "
+            "wird trotzdem angelegt."
+        )
 
     config = automation_config(alarmanlagen, kaffeemaschine, args.von, args.bis, unscharf)
     if args.nur_anzeigen:

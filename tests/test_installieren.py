@@ -566,9 +566,56 @@ async def test_keine_kaffeemaschine(
     assert code == 1
     assert "Keine den Einschalter" not in fehler  # Grammatik stimmt
     assert "Kein Einschalter der Kaffeemaschine in Home Assistant gefunden" in fehler
-    assert "kein Gerät der Integration „Home Connect“ eingebunden" in fehler
+    assert "Die Integration „Home Connect“ ist in Home Assistant nicht eingerichtet" in fehler
     assert installieren.HOME_CONNECT_ANLEITUNG in fehler
     assert "--kaffeemaschine <entity_id>" in fehler
+
+
+async def test_home_connect_nicht_geladen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ist Home Connect eingerichtet, aber nicht geladen, sagt das Skript genau das."""
+    eintrag = await home_connect(KAFFEEVOLLAUTOMAT)
+    assert await home_assistant.config_entries.async_unload(eintrag.entry_id)
+    await home_assistant.async_block_till_done()
+    # Home Assistant behält für die Entitäten einen Zustand „unavailable“.
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "unavailable"
+
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 1
+    assert "Integration „Home Connect“ (home_connect): nicht geladen" in fehler
+    assert "neu laden" in fehler
+    assert "Gerät „Kaffeevollautomat“ (SIEMENS TQ903D03, Integration: home_connect)" in fehler
+    assert "3 nicht verfügbar" in fehler and f"Schalter: {KAFFEEMASCHINE} (nicht verfügbar)" in fehler
+
+    # Ausdrücklich angegeben wird der Schalter genommen – mit Warnung.
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--kaffeemaschine", KAFFEEMASCHINE
+    )
+    assert code == 0, fehler
+    assert f"⚠ {KAFFEEMASCHINE} ist zurzeit nicht verfügbar" in ausgabe
+    assert len(gespeicherte_automationen(home_assistant)) == 1
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_diagnose(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--diagnose")
+    assert code == 0, fehler
+    assert "Integration „Home Connect“ (home_connect): geladen" in ausgabe
+    assert "Entitäten von „Kaffeevollautomat“:" in ausgabe
+    assert f"  {KAFFEEMASCHINE}  „Einschalter“  [home_connect]  Zustand: off" in ausgabe
+    assert "sensor.kaffeevollautomat_coffee_counter" in ausgabe and "nicht verfügbar (kein Zustand)" in ausgabe
+    assert "Entitäten von „Geschirrspüler“:" in ausgabe
+    assert gespeicherte_automationen(home_assistant) == []
 
 
 async def test_deaktivierter_einschalter_wird_aktiviert(
