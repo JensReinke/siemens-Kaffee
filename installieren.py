@@ -83,6 +83,12 @@ KAFFEEMASCHINE = re.compile(
 
 # Integrationen, über die Hausgeräte von Siemens/Bosch in Home Assistant kommen.
 HOME_CONNECT_DOMAINS = ("home_connect", "home_connect_alt")
+# Ab so vielen Entitäten ist ein Gerät eine Zentrale (CCU, Bridge, Hub), keine Kaffeemaschine.
+GROSSES_GERAET = 40
+# Mehr Schalter ohne „Einschalter“ im Namen bietet das Skript nicht blind an …
+MAX_SCHALTER = 8
+# … und mehr deaktivierte Entitäten nicht zum Aktivieren.
+MAX_ANGEBOT = 40
 HAUSGERAETE = re.compile(r"siemens|bosch|bsh|neff|gaggenau|home ?connect", re.IGNORECASE)
 EINTRAGSZUSTAENDE = {
     "loaded": "geladen",
@@ -365,10 +371,12 @@ def kandidaten_kaffeemaschine(
             str(w) for w in (geraet.get("manufacturer"), geraet.get("model")) if w
         ) or register.geraetename(geraet)
         schalter = [e for e in register.entitaeten_von(geraet) if e["entity_id"].startswith("switch.")]
-        # Heißt kein Schalter „Einschalter“, kommen alle Schalter des Geräts infrage.
         einschalter = [
             e for e in schalter if ist_einschalter(e["entity_id"], register.entitaetsname(e))
-        ] or schalter
+        ]
+        # Heißt kein Schalter „Einschalter“, kommen die wenigen Schalter des Geräts infrage.
+        if not einschalter and len(schalter) <= MAX_SCHALTER:
+            einschalter = schalter
         for entitaet in einschalter:
             entity_id = entitaet["entity_id"]
             if verfuegbar(entity_id, zustaende):
@@ -420,10 +428,12 @@ def diagnose(register: "Register", zustaende: dict[str, dict[str, Any]]) -> str:
             e for e in entitaeten
             if not e.get("disabled_by") and not verfuegbar(e["entity_id"], zustaende)
         ]
+        # Bei einer Zentrale nur die Schalter mit Kaffee-Bezug, sonst alle.
+        gezeigt = register.mit_kaffeebezug(geraet) if register.ist_gross(geraet) else entitaeten
         schalter = [
             e["entity_id"]
             + (" (deaktiviert)" if e in deaktiviert else " (nicht verfügbar)" if e in nicht_verfuegbar else "")
-            for e in entitaeten
+            for e in gezeigt
             if e["entity_id"].startswith("switch.")
         ]
         integrationen = ", ".join(sorted({str(e.get("domain")) for e in register.integrationen_von(geraet)}))
@@ -431,8 +441,17 @@ def diagnose(register: "Register", zustaende: dict[str, dict[str, Any]]) -> str:
             f"Gerät „{register.geraetename(geraet)}“ ({geraet.get('manufacturer')} {geraet.get('model')}, "
             f"Integration: {integrationen or '?'}): {len(entitaeten)} Entitäten, "
             f"{len(deaktiviert)} deaktiviert, {len(nicht_verfuegbar)} nicht verfügbar; "
-            f"Schalter: {', '.join(schalter) or 'keine'}"
+            f"Schalter{' mit Kaffee-Bezug' if register.ist_gross(geraet) else ''}: {', '.join(schalter) or 'keine'}"
         )
+    # Egal an welchem Gerät: aktive Schalter, die nach Kaffee klingen – z. B. eine
+    # Steckdose, über die die Maschine schon geschaltet wird.
+    kaffee_schalter = [
+        f"{entity_id} („{name_von(zustand)}“, {zustand['state']})"
+        for entity_id, zustand in sorted(zustaende.items())
+        if entity_id.startswith("switch.")
+        and (KAFFEEMASCHINE.search(entity_id) or KAFFEEMASCHINE.search(name_von(zustand)))
+    ]
+    zeilen.append("Aktive Schalter mit Kaffee-Bezug: " + (", ".join(kaffee_schalter) or "keine"))
     return "\n  ".join(zeilen)
 
 
@@ -445,8 +464,12 @@ def diagnose_ausfuehrlich(register: "Register", zustaende: dict[str, dict[str, A
             or HAUSGERAETE.search(f"{geraet.get('manufacturer')} {geraet.get('model')}")
         ):
             continue
-        zeilen.append(f"\nEntitäten von „{register.geraetename(geraet)}“:")
-        for entitaet in register.entitaeten_von(geraet):
+        gross = register.ist_gross(geraet)
+        zeilen.append(
+            f"\nEntitäten von „{register.geraetename(geraet)}“"
+            + (" (nur die mit Kaffee-Bezug):" if gross else ":")
+        )
+        for entitaet in register.mit_kaffeebezug(geraet) if gross else register.entitaeten_von(geraet):
             entity_id = entitaet["entity_id"]
             if entitaet.get("disabled_by"):
                 status = f"deaktiviert ({entitaet['disabled_by']})"
@@ -507,7 +530,9 @@ def deaktivierte_alarm_entitaeten(register: "Register") -> list[str]:
 
 
 def hinweis_deaktiviert(entity_ids: list[str], option: str = "--alarmanlage") -> str:
-    liste = "\n".join(f"    {entity_id}" for entity_id in entity_ids)
+    liste = "\n".join(f"    {entity_id}" for entity_id in entity_ids[:15])
+    if len(entity_ids) > 15:
+        liste += f"\n    … und {len(entity_ids) - 15} weitere"
     return (
         "Diese Entitäten gibt es in Home Assistant, sie sind aber deaktiviert und "
         f"deshalb nicht auswählbar:\n{liste}\n"
@@ -694,13 +719,35 @@ class Register:
     def ist_home_connect(self, geraet: dict[str, Any]) -> bool:
         return any(e.get("domain") in HOME_CONNECT_DOMAINS for e in self.integrationen_von(geraet))
 
+    def ist_gross(self, geraet: dict[str, Any]) -> bool:
+        """Eine Zentrale wie die CCU mit hunderten Programmen und Variablen."""
+        return len(self.entitaeten_von(geraet)) > GROSSES_GERAET
+
     def ist_kaffeemaschine(self, geraet: dict[str, Any]) -> bool:
-        """Erkennt eine Kaffeemaschine an Name, Modell oder ihren Entitäten (Bohnen, Kaffeezähler …)."""
-        merkmale = " ".join(
-            [str(geraet.get("name") or ""), self.geraetename(geraet), str(geraet.get("model") or "")]
-            + [f"{e['entity_id']} {self.entitaetsname(e)}" for e in self.entitaeten_von(geraet)]
+        """Erkennt eine Kaffeemaschine an Name, Modell oder ihren Entitäten (Bohnen, Kaffeezähler …).
+
+        Bei einer Zentrale zählen nur Name und Modell – sonst würde ein einzelnes
+        Programm namens „Kaffee“ die ganze CCU zur Kaffeemaschine machen.
+        """
+        if KAFFEEMASCHINE.search(
+            f"{geraet.get('name') or ''} {self.geraetename(geraet)} {geraet.get('model') or ''}"
+        ):
+            return True
+        if self.ist_gross(geraet):
+            return False
+        return any(
+            KAFFEEMASCHINE.search(f"{e['entity_id']} {self.entitaetsname(e)}")
+            for e in self.entitaeten_von(geraet)
         )
-        return bool(KAFFEEMASCHINE.search(merkmale))
+
+    def mit_kaffeebezug(self, geraet: dict[str, Any]) -> list[dict[str, Any]]:
+        """Die Entitäten eines Geräts, die nach Kaffee oder Einschalter klingen."""
+        return [
+            e
+            for e in self.entitaeten_von(geraet)
+            if KAFFEEMASCHINE.search(f"{e['entity_id']} {self.entitaetsname(e)}")
+            or (e["entity_id"].startswith("switch.") and ist_einschalter(e["entity_id"], self.entitaetsname(e)))
+        ]
 
 
 def entitaet_aktivieren(ha: HomeAssistant, entity_id: str) -> None:
@@ -1122,7 +1169,7 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
             deaktiviert = deaktivierte_alarm_entitaeten(ha.register())
             if deaktiviert:
                 hinweis = hinweis_deaktiviert(deaktiviert)
-                if interaktiv:
+                if interaktiv and len(deaktiviert) <= MAX_ANGEBOT:
                     alarmanlagen = deaktivierte_anbieten(ha, deaktiviert, zustaende)
         if not alarmanlagen:
             alarmanlagen = auswaehlen(
@@ -1149,8 +1196,8 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
         kandidaten, deaktiviert, hinweis = kandidaten_kaffeemaschine(ha.register(), zustaende)
         gewaehlt: list[str] = []
         if deaktiviert:
-            hinweis = hinweis_deaktiviert(deaktiviert, "--kaffeemaschine")
-            if interaktiv:
+            hinweis = hinweis_deaktiviert(deaktiviert, "--kaffeemaschine") + "\n  " + hinweis
+            if interaktiv and len(deaktiviert) <= MAX_ANGEBOT:
                 gewaehlt = deaktivierte_anbieten(
                     ha, deaktiviert, zustaende, "als Einschalter der Kaffeemaschine", mehrere=False
                 )
