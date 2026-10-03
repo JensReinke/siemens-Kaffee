@@ -10,7 +10,9 @@ Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen.
 Die Alarmanlage kann eine Alarmzentrale (alarm_control_panel) sein oder eine
 andere Entität, die ihren Zustand meldet – z. B. eine Systemvariable der
 Homematic-CCU (OpenCCU). Dann fragt das Skript, welcher Zustand „unscharf“
-bedeutet (oder nimmt --unscharf).
+bedeutet (oder nimmt --unscharf). Ist die Entität in Home Assistant noch
+deaktiviert, wie Homematic(IP) Local Systemvariablen anlegt, aktiviert das
+Skript sie auf Wunsch selbst.
 
 Aufruf im Heimnetz, z. B. auf einem Mac oder PC:
 
@@ -25,11 +27,15 @@ Alle Optionen zeigt: python3 installieren.py --hilfe
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
+import hashlib
 import json
 import os
 import re
 import socket
+import ssl
+import struct
 import sys
 import time
 import urllib.error
@@ -423,6 +429,17 @@ def kandidaten_alarmanlage(zustaende: dict[str, dict[str, Any]]) -> list[tuple[s
     ]
 
 
+def register_entitaeten(ha: HomeAssistant) -> list[str]:
+    """Alle Entitäten laut Register von Home Assistant – auch deaktivierte ohne Zustand."""
+    status, text = ha.anfrage("POST", "/api/template", json_daten={"template": REGISTER_TEMPLATE})
+    if status >= 400:
+        return []  # z. B. ältere Home-Assistant-Version ohne config_entry_attr
+    try:
+        return list(json.loads(text))
+    except json.JSONDecodeError:
+        return []
+
+
 def deaktivierte_alarm_entitaeten(
     ha: HomeAssistant, zustaende: dict[str, dict[str, Any]]
 ) -> list[str]:
@@ -432,16 +449,9 @@ def deaktivierte_alarm_entitaeten(
     der CCU standardmäßig so an – oder solche einer gerade nicht geladenen
     Integration. Auswählen kann man sie erst, wenn sie aktiv sind.
     """
-    status, text = ha.anfrage("POST", "/api/template", json_daten={"template": REGISTER_TEMPLATE})
-    if status >= 400:
-        return []  # z. B. ältere Home-Assistant-Version ohne config_entry_attr
-    try:
-        entity_ids = json.loads(text)
-    except json.JSONDecodeError:
-        return []
     return sorted(
         entity_id
-        for entity_id in set(entity_ids)
+        for entity_id in set(register_entitaeten(ha))
         if entity_id not in zustaende and alarm_treffer(entity_id)
     )
 
@@ -451,11 +461,223 @@ def hinweis_deaktiviert(entity_ids: list[str]) -> str:
     return (
         "Diese Entitäten gibt es in Home Assistant, sie sind aber deaktiviert und "
         f"deshalb nicht auswählbar:\n{liste}\n"
-        "  Aktivieren: Einstellungen → Geräte & Dienste → Entitäten → Filter "
+        "  Mit --alarmanlage <entity_id> angegeben, aktiviert dieses Skript sie selbst. "
+        "Von Hand: Einstellungen → Geräte & Dienste → Entitäten → Filter "
         "„Deaktivierte Entitäten anzeigen“ → Entität öffnen → Zahnrad → „Aktiviert“ "
         "einschalten. Bei Homematic(IP) Local geht es auch mit „hahm“ in der "
-        "Beschreibung der Systemvariable in der CCU. Danach dieses Skript erneut ausführen."
+        "Beschreibung der Systemvariable in der CCU."
     )
+
+
+class WebSocket:
+    """Ein kleiner WebSocket-Client (RFC 6455) für die WebSocket-API von Home Assistant.
+
+    Nur für das nötig, was die REST-API nicht kann: eine Entität aktivieren.
+    """
+
+    def __init__(self, url: str, token: Optional[str]) -> None:
+        teile = urllib.parse.urlparse(url)
+        sicher = teile.scheme == "https"
+        host = teile.hostname or ""
+        port = teile.port or (443 if sicher else 80)
+        try:
+            sock: socket.socket = socket.create_connection((host, port), timeout=ZEITLIMIT)
+            if sicher:
+                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+        except OSError as fehler:
+            raise Abbruch(f"Keine WebSocket-Verbindung zu {url} ({fehler}).") from fehler
+        self.sock = sock
+        self.puffer = b""
+        self.naechste_id = 0
+        self._verbinden(teile)
+        if self.empfangen().get("type") != "auth_required":
+            raise Abbruch("Unerwartete Begrüßung der WebSocket-API von Home Assistant.")
+        self.senden({"type": "auth", "access_token": token})
+        antwort = self.empfangen()
+        if antwort.get("type") != "auth_ok":
+            raise Abbruch(f"WebSocket-Anmeldung fehlgeschlagen: {antwort.get('message', antwort)}")
+
+    def _verbinden(self, teile: urllib.parse.ParseResult) -> None:
+        schluessel = base64.b64encode(os.urandom(16)).decode()
+        pfad = teile.path.rstrip("/") + "/api/websocket"
+        self.sock.sendall(
+            (
+                f"GET {pfad} HTTP/1.1\r\nHost: {teile.netloc}\r\nUpgrade: websocket\r\n"
+                f"Connection: Upgrade\r\nSec-WebSocket-Key: {schluessel}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode()
+        )
+        antwort = b""
+        while b"\r\n\r\n" not in antwort:
+            teil = self.sock.recv(4096)
+            if not teil:
+                raise Abbruch("Home Assistant hat die WebSocket-Verbindung nicht angenommen.")
+            antwort += teil
+        kopf, _, self.puffer = antwort.partition(b"\r\n\r\n")
+        zeilen = kopf.decode("latin-1").split("\r\n")
+        if " 101 " not in zeilen[0]:
+            raise Abbruch(f"Home Assistant lehnt die WebSocket-Verbindung ab: {zeilen[0]}")
+        erwartet = base64.b64encode(
+            hashlib.sha1((schluessel + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
+        ).decode()
+        for zeile in zeilen[1:]:
+            name, _, wert = zeile.partition(":")
+            if name.strip().lower() == "sec-websocket-accept" and wert.strip() != erwartet:
+                raise Abbruch("Ungültige WebSocket-Antwort von Home Assistant.")
+
+    def _lesen(self, anzahl: int) -> bytes:
+        while len(self.puffer) < anzahl:
+            teil = self.sock.recv(65536)
+            if not teil:
+                raise Abbruch("Die WebSocket-Verbindung zu Home Assistant wurde unterbrochen.")
+            self.puffer += teil
+        daten, self.puffer = self.puffer[:anzahl], self.puffer[anzahl:]
+        return daten
+
+    def _rahmen_senden(self, opcode: int, daten: bytes) -> None:
+        kopf = bytearray([0x80 | opcode])
+        if len(daten) < 126:
+            kopf.append(0x80 | len(daten))
+        elif len(daten) < 65536:
+            kopf.append(0x80 | 126)
+            kopf += struct.pack("!H", len(daten))
+        else:
+            kopf.append(0x80 | 127)
+            kopf += struct.pack("!Q", len(daten))
+        maske = os.urandom(4)  # Clients müssen ihre Daten maskieren
+        kopf += maske
+        self.sock.sendall(bytes(kopf) + bytes(b ^ maske[i % 4] for i, b in enumerate(daten)))
+
+    def senden(self, nachricht: dict[str, Any]) -> None:
+        self._rahmen_senden(0x1, json.dumps(nachricht).encode())
+
+    def empfangen(self) -> dict[str, Any]:
+        nutzlast = b""
+        while True:
+            erstes, zweites = self._lesen(2)
+            fin, opcode = erstes & 0x80, erstes & 0x0F
+            laenge = zweites & 0x7F
+            if laenge == 126:
+                laenge = struct.unpack("!H", self._lesen(2))[0]
+            elif laenge == 127:
+                laenge = struct.unpack("!Q", self._lesen(8))[0]
+            maske = self._lesen(4) if zweites & 0x80 else b""
+            daten = self._lesen(laenge)
+            if maske:
+                daten = bytes(b ^ maske[i % 4] for i, b in enumerate(daten))
+            if opcode == 0x8:
+                raise Abbruch("Home Assistant hat die WebSocket-Verbindung geschlossen.")
+            if opcode == 0x9:
+                self._rahmen_senden(0xA, daten)  # Ping → Pong
+                continue
+            if opcode == 0xA:
+                continue
+            nutzlast += daten
+            if fin:
+                return json.loads(nutzlast.decode())
+
+    def befehl(self, **nachricht: Any) -> Any:
+        """Schickt einen Befehl und gibt dessen Ergebnis zurück."""
+        self.naechste_id += 1
+        self.senden({"id": self.naechste_id, **nachricht})
+        while True:
+            antwort = self.empfangen()
+            if antwort.get("id") == self.naechste_id and antwort.get("type") == "result":
+                if not antwort.get("success"):
+                    fehler = antwort.get("error") or {}
+                    raise Abbruch(f"Home Assistant meldet: {fehler.get('message', fehler)}")
+                return antwort.get("result")
+
+    def schliessen(self) -> None:
+        try:
+            self._rahmen_senden(0x8, struct.pack("!H", 1000))
+        except OSError:
+            pass
+        finally:
+            self.sock.close()
+
+
+def entitaet_aktivieren(ha: HomeAssistant, entity_id: str) -> None:
+    """Aktiviert eine deaktivierte Entität – wie der Schalter „Aktiviert“ in ihren Einstellungen."""
+    ws = WebSocket(ha.url, ha.token)
+    try:
+        ergebnis = ws.befehl(
+            type="config/entity_registry/update", entity_id=entity_id, disabled_by=None
+        )
+    finally:
+        ws.schliessen()
+    if (ergebnis or {}).get("require_restart"):
+        raise Abbruch(
+            f"{entity_id} ist jetzt aktiviert, aber Home Assistant muss dafür neu gestartet "
+            "werden (Einstellungen → System → Neu starten). Danach dieses Skript erneut ausführen."
+        )
+
+
+def auf_zustand_warten(ha: HomeAssistant, entity_id: str, sekunden: int = 150) -> dict[str, Any]:
+    """Wartet, bis die Entität einen Zustand meldet.
+
+    Nach dem Aktivieren lädt Home Assistant die Integration erst nach etwa
+    30 Sekunden neu, und der erste Wert braucht noch einen Moment.
+    """
+    print(
+        f"  Warte auf {entity_id} – Home Assistant lädt die Integration nach etwa "
+        "30 Sekunden neu …",
+        end="",
+        flush=True,
+    )
+    for versuch in range(sekunden):
+        status, text = ha.anfrage("GET", f"/api/states/{entity_id}")
+        if status == 200:
+            zustand = json.loads(text)
+            if zustand.get("state") not in ("unknown", "unavailable"):
+                print(" da.")
+                return zustand
+        if versuch % 5 == 4:
+            print(".", end="", flush=True)
+        time.sleep(1)
+    print()
+    raise Abbruch(
+        f"{entity_id} meldet auch nach {sekunden} Sekunden keinen Zustand. Ist die Integration "
+        "verbunden? Unter Einstellungen → Geräte & Dienste nachsehen und das Skript erneut ausführen."
+    )
+
+
+def aktivieren_und_warten(
+    ha: HomeAssistant, entity_ids: list[str], zustaende: dict[str, dict[str, Any]]
+) -> None:
+    for entity_id in entity_ids:
+        entitaet_aktivieren(ha, entity_id)
+        print(f"✓ {entity_id} aktiviert")
+    for entity_id in entity_ids:
+        zustaende[entity_id] = auf_zustand_warten(ha, entity_id)
+
+
+def alarm_entitaet_bereitstellen(
+    ha: HomeAssistant, entity_id: str, zustaende: dict[str, dict[str, Any]]
+) -> str:
+    """Prüft eine mit --alarmanlage angegebene Entität; ist sie nur deaktiviert, wird sie aktiviert."""
+    domain_pruefen(entity_id, ALARM_DOMAINS, "--alarmanlage")
+    if entity_id not in zustaende and entity_id in register_entitaeten(ha):
+        print(f"  {entity_id} ist deaktiviert – wird aktiviert.")
+        aktivieren_und_warten(ha, [entity_id], zustaende)
+    return entitaet_pruefen(entity_id, ALARM_DOMAINS, zustaende, "--alarmanlage")
+
+
+def deaktivierte_anbieten(
+    ha: HomeAssistant, deaktiviert: list[str], zustaende: dict[str, dict[str, Any]]
+) -> list[str]:
+    """Bietet im Terminal an, deaktivierte Entitäten zu aktivieren und als Alarmanlage zu nehmen."""
+    gewaehlt = menue(
+        "Diese Entitäten gibt es in Home Assistant, sie sind aber deaktiviert. Soll ich eine "
+        "davon aktivieren und als Alarmanlage verwenden? (mehrere möglich)",
+        deaktiviert,
+        mehrere=True,
+        optional=True,
+    )
+    entity_ids = [deaktiviert[index] for index in gewaehlt]
+    if entity_ids:
+        aktivieren_und_warten(ha, entity_ids, zustaende)
+    return entity_ids
 
 
 def unscharf_bestimmen(
@@ -496,17 +718,27 @@ def unscharf_bestimmen(
     return antwort or aktuell
 
 
-def menue(frage: str, eintraege: list[str], mehrere: bool = False) -> list[int]:
+def menue(
+    frage: str, eintraege: list[str], mehrere: bool = False, optional: bool = False
+) -> list[int]:
     """Lässt den Benutzer Einträge wählen und gibt deren Indizes zurück.
 
-    Mit ``mehrere`` dürfen es mehrere Nummern sein, durch Komma getrennt.
+    Mit ``mehrere`` dürfen es mehrere Nummern sein, durch Komma getrennt; mit
+    ``optional`` darf die Antwort leer bleiben (dann kommt eine leere Liste).
     """
     print(f"\n{frage}")
     for nr, eintrag in enumerate(eintraege, 1):
         print(f"  {nr}) {eintrag}")
-    aufforderung = f"Nummer{'n, durch Komma getrennt,' if mehrere else ''} [1-{len(eintraege)}]: "
+    aufforderung = (
+        f"Nummer{'n, durch Komma getrennt,' if mehrere else ''} [1-{len(eintraege)}]"
+        + (" oder Enter zum Überspringen" if optional else "")
+        + ": "
+    )
     while True:
-        nummern = [teil.strip() for teil in input(aufforderung).replace(";", ",").split(",")]
+        eingabe = input(aufforderung).strip()
+        if optional and not eingabe:
+            return []
+        nummern = [teil.strip() for teil in eingabe.replace(";", ",").split(",")]
         if (
             nummern
             and all(nummer.isdigit() and 1 <= int(nummer) <= len(eintraege) for nummer in nummern)
@@ -559,15 +791,19 @@ def auswaehlen(
     return [kandidaten[index][0] for index in gewaehlt]
 
 
+def domain_pruefen(entity_id: str, domains: tuple[str, ...], option: str) -> None:
+    if entity_id.split(".", 1)[0] not in domains:
+        bereiche = ", ".join(f"„{domain}“" for domain in domains)
+        raise Abbruch(f"{option} erwartet eine Entität aus dem Bereich {bereiche}, nicht „{entity_id}“.")
+
+
 def entitaet_pruefen(
     entity_id: str,
     domains: tuple[str, ...],
     zustaende: dict[str, dict[str, Any]],
     option: str,
 ) -> str:
-    if entity_id.split(".", 1)[0] not in domains:
-        bereiche = ", ".join(f"„{domain}“" for domain in domains)
-        raise Abbruch(f"{option} erwartet eine Entität aus dem Bereich {bereiche}, nicht „{entity_id}“.")
+    domain_pruefen(entity_id, domains, option)
     if entity_id not in zustaende:
         raise Abbruch(f"Die Entität „{entity_id}“ gibt es in Home Assistant nicht.")
     return entity_id
@@ -659,7 +895,8 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
         metavar="ENTITY_ID",
         help=(
             "Entitäts-ID der Alarmanlage, falls sie nicht automatisch gefunden wird; "
-            "mehrfach möglich, z. B. je eine Systemvariable für Hüllschutz und Vollschutz"
+            "mehrfach möglich, z. B. je eine Systemvariable für Hüllschutz und Vollschutz. "
+            "Eine deaktivierte Entität wird dabei aktiviert"
         ),
     )
     parser.add_argument(
@@ -739,8 +976,7 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
     zustaende = {z["entity_id"]: z for z in ha.get_json("/api/states")}
     if args.alarmanlage:
         alarmanlagen = [
-            entitaet_pruefen(anlage, ALARM_DOMAINS, zustaende, "--alarmanlage")
-            for anlage in args.alarmanlage
+            alarm_entitaet_bereitstellen(ha, anlage, zustaende) for anlage in args.alarmanlage
         ]
     else:
         kandidaten = kandidaten_alarmanlage(zustaende)
@@ -748,19 +984,23 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
             "Ist die Alarmanlage in Home Assistant eingebunden – als Alarmzentrale "
             "(alarm_control_panel) oder z. B. als Systemvariable der CCU (Sensor, Auswahl, Schalter)?"
         )
+        alarmanlagen: list[str] = []
         if not any(entity_id.startswith("alarm_control_panel.") for entity_id, _ in kandidaten):
             deaktiviert = deaktivierte_alarm_entitaeten(ha, zustaende)
             if deaktiviert:
                 hinweis = hinweis_deaktiviert(deaktiviert)
-        alarmanlagen = auswaehlen(
-            kandidaten,
-            "Keine Alarmanlage",
-            "die Alarmanlage",
-            "--alarmanlage",
-            interaktiv,
-            hinweis,
-            mehrere=True,
-        )
+                if interaktiv:
+                    alarmanlagen = deaktivierte_anbieten(ha, deaktiviert, zustaende)
+        if not alarmanlagen:
+            alarmanlagen = auswaehlen(
+                kandidaten,
+                "Keine Alarmanlage",
+                "die Alarmanlage",
+                "--alarmanlage",
+                interaktiv,
+                hinweis,
+                mehrere=True,
+            )
     unscharf = unscharf_bestimmen(alarmanlagen, zustaende, args.unscharf, interaktiv)
     print(
         "✓ Alarmanlage: "

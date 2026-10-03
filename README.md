@@ -39,10 +39,11 @@ Benachrichtigung aufs Handy) ergänzen.
   „unscharf“ bedeutet (z. B. `Unscharf` oder `off`). Es dürfen auch mehrere
   Entitäten sein, etwa je eine Variable für Hüllschutz und Vollschutz.
   Homematic(IP) Local legt Systemvariablen standardmäßig als **deaktivierte**
-  Entitäten an. Aktivieren: **Einstellungen → Geräte & Dienste → Entitäten**,
-  Filter „Deaktivierte Entitäten anzeigen“, Entität öffnen → Zahnrad →
-  „Aktiviert“. Oder in der CCU `hahm` in die Beschreibung der Systemvariable
-  schreiben, dann wird sie aktiv (und schaltbar) angelegt.
+  Entitäten an. Das Skript kann sie selbst aktivieren; von Hand geht es unter
+  **Einstellungen → Geräte & Dienste → Entitäten**, Filter „Deaktivierte
+  Entitäten anzeigen“, Entität öffnen → Zahnrad → „Aktiviert“. Oder in der
+  CCU `hahm` in die Beschreibung der Systemvariable schreiben, dann wird sie
+  aktiv (und schaltbar) angelegt.
 
 Kurzer Test vorab: Schalte den „Einschalter“ der Kaffeemaschine in Home
 Assistant einmal von Hand ein. Geht die Maschine an, funktioniert auch die
@@ -75,8 +76,9 @@ ist. Es braucht nur Python 3, keine Zusatzpakete.
    `1,2`). Ist die Alarmanlage keine Alarmzentrale (z. B. eine
    CCU-Systemvariable), fragt es außerdem, welcher Zustand „unscharf“
    bedeutet, und schlägt den aktuellen Zustand bzw. die möglichen Werte vor.
-   Passende, aber deaktivierte Entitäten nennt es mit Anleitung zum
-   Aktivieren.
+   Passende, aber deaktivierte Entitäten (so legt Homematic(IP) Local
+   Systemvariablen an) bietet es zum Aktivieren an und wartet dann, bis
+   Home Assistant die Integration neu geladen hat.
 
 Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen.
 Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
@@ -86,7 +88,7 @@ Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
 | `--probelauf` | Löst die Automation nach dem Einrichten einmal aus – die Kaffeemaschine geht wirklich an. |
 | `--nur-anzeigen` | Zeigt nur, was eingerichtet würde, ändert nichts. |
 | `--von 6:00 --bis 10:00` | Anderes Zeitfenster. |
-| `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen; `--alarmanlage` auch mehrfach. |
+| `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen; `--alarmanlage` auch mehrfach, eine deaktivierte Entität wird dabei aktiviert. |
 | `--unscharf Unscharf` | Zustand, der „unscharf“ bedeutet, wenn die Alarmanlage keine Alarmzentrale ist. |
 | `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
 
