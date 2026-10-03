@@ -87,6 +87,7 @@ Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
 | --- | --- |
 | `--probelauf` | Löst die Automation nach dem Einrichten einmal aus – die Kaffeemaschine geht wirklich an. |
 | `--nur-anzeigen` | Zeigt nur, was eingerichtet würde, ändert nichts. |
+| `--diagnose` | Zeigt nur, was Home Assistant über Home Connect und Hausgeräte weiß (Integrationen mit Zustand, Geräte, alle Entitäten), zur Fehlersuche. |
 | `--von 6:00 --bis 10:00` | Anderes Zeitfenster. |
 | `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen; `--alarmanlage` auch mehrfach, eine deaktivierte Entität wird dabei aktiviert. |
 | `--unscharf Unscharf` | Zustand, der „unscharf“ bedeutet, wenn die Alarmanlage keine Alarmzentrale ist. |
