@@ -362,6 +362,86 @@ async def test_zweiter_aufruf_aktualisiert_statt_zu_verdoppeln(
 
 
 @pytest.mark.usefixtures("kaffeemaschine")
+async def test_zweiter_aufruf_uebernimmt_die_einstellungen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Gibt es die Automation schon, fragt das Skript nichts erneut, sondern übernimmt ihre Einstellungen."""
+    home_assistant.states.async_remove(ALARMANLAGE)
+    home_assistant.states.async_set(
+        SYSTEMVARIABLE, "Scharf", {"friendly_name": "OpenCCU Alarmanlage", "options": ["Scharf", "Unscharf"]}
+    )
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token,
+        "--alarmanlage", SYSTEMVARIABLE, "--unscharf", "Unscharf", "--von", "6:00", "--bis", "10:00",
+    )
+    assert code == 0, fehler
+    [vorher] = gespeicherte_automationen(home_assistant)
+
+    # Zweiter Aufruf nur mit --licht: keine einzige Rückfrage, nichts an der Kaffee-Automation geändert.
+    with (
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=AssertionError("Es darf keine Rückfrage geben")),
+    ):
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT
+        )
+    assert code == 0, fehler
+    assert f"✓ Die Automation „{installieren.ALIAS}“ gibt es schon" in ausgabe
+    assert f"✓ Alarmanlage: {SYSTEMVARIABLE} („OpenCCU Alarmanlage“), unscharf = „Unscharf“" in ausgabe
+    assert f"✓ Kaffeemaschine: {KAFFEEMASCHINE}" in ausgabe
+    assert "✓ Automation aktualisiert" in ausgabe
+    assert "Zeitfenster 06:00–10:00 Uhr" in ausgabe
+    automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
+    assert automationen[installieren.AUTOMATION_ID] == vorher
+    assert installieren.LICHT_AUTOMATION_ID in automationen
+
+    # Einzelne Angaben überschreiben nur den jeweiligen Wert.
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--von", "5:00")
+    assert code == 0, fehler
+    assert "Zeitfenster 05:00–10:00 Uhr" in ausgabe
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_uebernahme_nur_solange_es_die_entitaet_gibt(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ist die gespeicherte Alarmanlage verschwunden, sucht das Skript wieder selbst."""
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+
+    home_assistant.states.async_remove(ALARMANLAGE)
+    home_assistant.states.async_set("alarm_control_panel.neu", "armed_away", {"friendly_name": "Neue Zentrale"})
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert "✓ Alarmanlage: alarm_control_panel.neu („Neue Zentrale“)" in ausgabe
+    [automation] = gespeicherte_automationen(home_assistant)
+    assert automation["triggers"][0]["entity_id"] == "alarm_control_panel.neu"
+
+
+def test_uebernehmen_ist_nachsichtig() -> None:
+    """Auch eine in Home Assistant bearbeitete Automation liefert, was noch lesbar ist."""
+    config = installieren.automation_config([ALARMANLAGE, "sensor.zweite"], KAFFEEMASCHINE, "06:00:00", "10:00:00", "Unscharf")
+    assert installieren.uebernehmen(config) == {
+        "alarmanlagen": [ALARMANLAGE, "sensor.zweite"],
+        "unscharf": "Unscharf",
+        "kaffeemaschine": KAFFEEMASCHINE,
+        "von": "06:00:00",
+        "bis": "10:00:00",
+    }
+    config["conditions"][0]["after"] = "{{ states('input_datetime.aufstehen') }}"
+    config["actions"] = [{"action": "light.turn_on", "target": {"entity_id": "light.kuche"}}]
+    assert installieren.uebernehmen(config) == {"alarmanlagen": [ALARMANLAGE, "sensor.zweite"], "unscharf": "Unscharf"}
+    assert installieren.uebernehmen({"triggers": "kaputt", "actions": None}) == {}
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
 async def test_nur_anzeigen_aendert_nichts(
     home_assistant: HomeAssistant,
     client: TestClient,
