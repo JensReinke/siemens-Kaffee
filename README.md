@@ -91,12 +91,21 @@ Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
 | `--von 6:00 --bis 10:00` | Anderes Zeitfenster. |
 | `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen; `--alarmanlage` auch mehrfach, eine deaktivierte Entität wird dabei aktiviert. |
 | `--unscharf Unscharf` | Zustand, der „unscharf“ bedeutet, wenn die Alarmanlage keine Alarmzentrale ist. |
+| `--licht switch.led_kaffee` | Ein Licht oder eine Steckdose an der Maschine (`light.…` oder `switch.…`) geht in einer zweiten Automation mit der Kaffeemaschine an und aus – egal ob die Automation, Home Assistant oder jemand am Gerät sie einschaltet. Eine deaktivierte Entität wird dabei aktiviert. |
 | `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
 
 Das Skript legt die Automation ohne Blueprint an (wie in
-[`beispiele/automation_ohne_blueprint.yaml`](beispiele/automation_ohne_blueprint.yaml)).
+[`beispiele/automation_ohne_blueprint.yaml`](beispiele/automation_ohne_blueprint.yaml);
+mit `--licht` zusätzlich
+[`beispiele/licht_folgt_kaffeemaschine.yaml`](beispiele/licht_folgt_kaffeemaschine.yaml)).
 Sie lässt sich danach ganz normal unter **Einstellungen → Automationen &
 Szenen** bearbeiten.
+
+Die eingebaute Tassenbeleuchtung eines Siemens-Vollautomaten lässt sich so
+nicht schalten: Home Connect meldet sie nur als Zustand, nicht als
+Einstellung, und auch im Gerätemenü gibt es dafür keine Option. `--licht`
+ist für ein zusätzliches Licht an der Maschine gedacht, z. B. eine
+LED-Leiste an einer Homematic-Schaltsteckdose.
 
 ## Einrichten mit Blueprint
 
@@ -193,6 +202,7 @@ Warum die Automation (nicht) gelaufen ist, zeigt ihre **Ablaufverfolgung**
 | --- | --- |
 | [`blueprints/automation/siemens_kaffee/kaffeemaschine_bei_unscharf.yaml`](blueprints/automation/siemens_kaffee/kaffeemaschine_bei_unscharf.yaml) | Blueprint |
 | [`beispiele/automation_ohne_blueprint.yaml`](beispiele/automation_ohne_blueprint.yaml) | Dieselbe Automation ohne Blueprint |
+| [`beispiele/licht_folgt_kaffeemaschine.yaml`](beispiele/licht_folgt_kaffeemaschine.yaml) | Zweite Automation (optional): Licht an der Maschine folgt der Kaffeemaschine |
 | [`installieren.py`](installieren.py) | Richtet die Automation per Befehl in Home Assistant ein |
 | [`tests/`](tests/) | Automatische Tests |
 

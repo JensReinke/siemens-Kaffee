@@ -14,6 +14,10 @@ bedeutet (oder nimmt --unscharf). Ist die Entität in Home Assistant noch
 deaktiviert, wie Homematic(IP) Local Systemvariablen anlegt, aktiviert das
 Skript sie auf Wunsch selbst.
 
+Mit --licht <entity_id> legt es zusätzlich eine zweite Automation an: Ein Licht
+oder eine Steckdose an der Maschine geht mit der Kaffeemaschine an und aus –
+egal ob die Automation, Home Assistant oder jemand am Gerät sie einschaltet.
+
 Aufruf im Heimnetz, z. B. auf einem Mac oder PC:
 
     python3 installieren.py --url http://homeassistant.local:8123
@@ -45,6 +49,10 @@ from typing import Any, Callable, Optional
 
 AUTOMATION_ID = "siemens_kaffee_bei_unscharf"
 ALIAS = "Kaffeemaschine an, wenn die Alarmanlage morgens unscharf geschaltet wird"
+# Die zweite Automation für --licht: Licht an der Maschine folgt der Kaffeemaschine.
+LICHT_AUTOMATION_ID = "siemens_kaffee_licht"
+LICHT_ALIAS = "Licht an der Kaffeemaschine folgt der Kaffeemaschine"
+LICHT_DOMAINS = ("light", "switch")
 HOME_CONNECT_ANLEITUNG = "https://github.com/JensReinke/siemens-Kaffee#home-connect-einrichten"
 STANDARD_URL = "http://homeassistant.local:8123"
 STANDARD_VON = "05:00"
@@ -152,6 +160,32 @@ def automation_config(
             },
         ],
         "actions": [{"action": "switch.turn_on", "target": {"entity_id": kaffeemaschine}}],
+    }
+
+
+def licht_config(kaffeemaschine: str, licht: str) -> dict[str, Any]:
+    """Dieselbe Automation wie beispiele/licht_folgt_kaffeemaschine.yaml.
+
+    Das Licht (oder die Steckdose) an der Maschine geht mit dem Einschalter der
+    Kaffeemaschine an und aus – auch wenn jemand die Maschine am Gerät oder in
+    Home Assistant schaltet. ``homeassistant.turn_on`` schaltet Lichter und
+    Schalter gleichermaßen.
+    """
+    return {
+        "alias": LICHT_ALIAS,
+        "description": "Schaltet das Licht an der Kaffeemaschine zusammen mit der Maschine ein und aus.",
+        "mode": "restart",
+        "triggers": [
+            {"trigger": "state", "entity_id": kaffeemaschine, "to": "on", "id": "an"},
+            {"trigger": "state", "entity_id": kaffeemaschine, "to": "off", "id": "aus"},
+        ],
+        "actions": [
+            {
+                "if": [{"condition": "trigger", "id": "an"}],
+                "then": [{"action": "homeassistant.turn_on", "target": {"entity_id": licht}}],
+                "else": [{"action": "homeassistant.turn_off", "target": {"entity_id": licht}}],
+            }
+        ],
     }
 
 
@@ -368,6 +402,7 @@ def kandidaten_kaffeemaschine(
         return kandidaten, [], diagnose(register, zustaende)
 
     kandidaten: list[tuple[str, str]] = []
+    echte_einschalter: list[tuple[str, str]] = []
     deaktiviert: list[str] = []
     for geraet in geraete:
         hersteller_modell = " ".join(
@@ -377,17 +412,25 @@ def kandidaten_kaffeemaschine(
         einschalter = [
             e for e in schalter if ist_einschalter(e["entity_id"], register.entitaetsname(e))
         ]
+        echt = bool(einschalter)
         # Heißt kein Schalter „Einschalter“, kommen die wenigen Schalter des Geräts infrage.
         if not einschalter and len(schalter) <= MAX_SCHALTER:
             einschalter = schalter
         for entitaet in einschalter:
             entity_id = entitaet["entity_id"]
             if verfuegbar(entity_id, zustaende):
-                kandidaten.append((entity_id, f"„{name_von(zustaende[entity_id])}“, {hersteller_modell}"))
+                kandidat = (entity_id, f"„{name_von(zustaende[entity_id])}“, {hersteller_modell}")
+                kandidaten.append(kandidat)
+                if echt:
+                    echte_einschalter.append(kandidat)
             elif entitaet.get("disabled_by"):
                 deaktiviert.append(entity_id)
             # Sonst: aktiv, aber nicht verfügbar (Integration nicht geladen, Gerät
             # offline) – steht in der Diagnose.
+    # Gibt es einen echten „Einschalter“, fallen bloße Schalter anderer Geräte weg –
+    # sonst stünde die Steckdose „LED Kaffee“ als zweite Kaffeemaschine neben dem Vollautomaten.
+    if echte_einschalter:
+        kandidaten = echte_einschalter
     return kandidaten, sorted(deaktiviert), diagnose(register, zustaende)
 
 
@@ -987,19 +1030,23 @@ def entitaet_pruefen(
     return entity_id
 
 
-def automation_entitaet(ha: HomeAssistant) -> Optional[dict[str, Any]]:
-    """Die Automation mit unserer ID – oder None, wenn sie (noch) nicht geladen ist."""
+def automation_entitaet(
+    ha: HomeAssistant, automation_id: str = AUTOMATION_ID
+) -> Optional[dict[str, Any]]:
+    """Die Automation mit dieser ID – oder None, wenn sie (noch) nicht geladen ist."""
     for zustand in ha.get_json("/api/states"):
         if zustand["entity_id"].startswith("automation.") and (
-            zustand.get("attributes", {}).get("id") == AUTOMATION_ID
+            zustand.get("attributes", {}).get("id") == automation_id
         ):
             return zustand
     return None
 
 
-def installieren(ha: HomeAssistant, config: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def installieren(
+    ha: HomeAssistant, config: dict[str, Any], automation_id: str = AUTOMATION_ID
+) -> tuple[str, dict[str, Any]]:
     """Legt die Automation an bzw. aktualisiert sie und wartet, bis sie aktiv ist."""
-    pfad = f"/api/config/automation/config/{AUTOMATION_ID}"
+    pfad = f"/api/config/automation/config/{automation_id}"
     status, _ = ha.anfrage("GET", pfad)
     vorhanden = status == 200
     status, text = ha.anfrage("POST", pfad, json_daten=config)
@@ -1010,7 +1057,7 @@ def installieren(ha: HomeAssistant, config: dict[str, Any]) -> tuple[str, dict[s
         )
     ha._json(status, text, "POST", pfad)
     for _ in range(20):
-        zustand = automation_entitaet(ha)
+        zustand = automation_entitaet(ha, automation_id)
         if zustand is not None:
             return ("aktualisiert" if vorhanden else "angelegt"), zustand
         time.sleep(0.5)
@@ -1036,6 +1083,21 @@ def probelauf(ha: HomeAssistant, automation: str, kaffeemaschine: str) -> str:
         f"Die Automation wurde ausgelöst, aber {kaffeemaschine} meldet nach 30 s "
         "noch nicht „an“. Ist die Maschine im Standby mit dem WLAN verbunden und "
         "die Fernsteuerung in Home Connect erlaubt?"
+    )
+
+
+def licht_pruefen(ha: HomeAssistant, licht: str, sekunden: int = 10) -> str:
+    """Nach dem Probelauf: Ist das Licht an der Maschine mit angegangen?"""
+    for _ in range(sekunden):
+        zustand = ha.get_json(f"/api/states/{licht}")["state"]
+        if zustand == "on":
+            return "✓ Das Licht an der Maschine ist angegangen."
+        if zustand == "unavailable":
+            break
+        time.sleep(1)
+    return (
+        f"⚠ {licht} ist nicht mit angegangen. Ist die Steckdose bzw. das Licht eingesteckt "
+        "und in Home Assistant erreichbar? Die Automation ist trotzdem eingerichtet."
     )
 
 
@@ -1086,6 +1148,14 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--kaffeemaschine", help="Entitäts-ID des Einschalters der Kaffeemaschine")
+    parser.add_argument(
+        "--licht",
+        metavar="ENTITY_ID",
+        help=(
+            "Licht oder Steckdose an der Kaffeemaschine (light.… oder switch.…): geht in einer "
+            "zweiten Automation mit der Maschine an und aus. Eine deaktivierte Entität wird aktiviert"
+        ),
+    )
     parser.add_argument(
         "--von",
         type=uhrzeit,
@@ -1229,10 +1299,26 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
             "wird trotzdem angelegt."
         )
 
+    licht = None
+    if args.licht:
+        licht = entitaet_bereitstellen(ha, args.licht, zustaende, LICHT_DOMAINS, "--licht")
+        if licht == kaffeemaschine:
+            raise Abbruch(f"--licht {licht} ist der Einschalter der Kaffeemaschine selbst.")
+        print(f"✓ Licht an der Maschine: {licht} („{name_von(zustaende[licht])}“)")
+        if not verfuegbar(licht, zustaende):
+            print(
+                f"⚠ {licht} ist zurzeit nicht verfügbar – ist die Steckdose bzw. das Licht eingesteckt "
+                "und in der Zentrale erreichbar? Die Automation wird trotzdem angelegt."
+            )
+
     config = automation_config(alarmanlagen, kaffeemaschine, args.von, args.bis, unscharf)
+    licht_konfig = licht_config(kaffeemaschine, licht) if licht else None
     if args.nur_anzeigen:
         print("\nDiese Automation würde eingerichtet (nichts geändert):")
         print(json.dumps(config, indent=2, ensure_ascii=False))
+        if licht_konfig:
+            print("\nUnd diese zweite Automation für das Licht an der Maschine:")
+            print(json.dumps(licht_konfig, indent=2, ensure_ascii=False))
         return 0
 
     ergebnis, automation = installieren(ha, config)
@@ -1245,14 +1331,32 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
     if not aktiv:
         raise Abbruch("Die Automation ist nicht aktiv. Details zeigt ihre Ablaufverfolgung in Home Assistant.")
 
+    if licht_konfig:
+        ergebnis, licht_automation = installieren(ha, licht_konfig, LICHT_AUTOMATION_ID)
+        licht_aktiv = licht_automation["state"] == "on"
+        print(
+            f"✓ Automation {ergebnis}: „{LICHT_ALIAS}“\n"
+            f"  {licht_automation['entity_id']}, "
+            f"{'aktiv' if licht_aktiv else 'NICHT aktiv: ' + licht_automation['state']}"
+        )
+        if not licht_aktiv:
+            raise Abbruch(
+                "Die Licht-Automation ist nicht aktiv. Details zeigt ihre Ablaufverfolgung in Home Assistant."
+            )
+
     if args.probelauf:
         print("Probelauf: Automation wird ausgelöst …")
         print(f"✓ {probelauf(ha, automation['entity_id'], kaffeemaschine)}")
+        if licht:
+            print(licht_pruefen(ha, licht))
 
     print(
         "\nFertig. Wird die Alarmanlage im Zeitfenster unscharf geschaltet, geht die "
-        "Kaffeemaschine an.\nZum Ändern: Einstellungen → Automationen & Szenen → „"
+        "Kaffeemaschine an."
+        + (" Das Licht an der Maschine geht mit ihr an und aus." if licht else "")
+        + "\nZum Ändern: Einstellungen → Automationen & Szenen → „"
         + ALIAS
+        + ("“ bzw. „" + LICHT_ALIAS if licht else "")
         + "“."
     )
     return 0

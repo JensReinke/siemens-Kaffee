@@ -1,0 +1,33 @@
+# Zweite Automation (optional): Ein Licht oder eine Steckdose an der
+# Kaffeemaschine geht mit der Maschine an und aus – egal ob die Automation,
+# Home Assistant oder jemand am Gerät sie einschaltet.
+# Einfügen wie beispiele/automation_ohne_blueprint.yaml: Einstellungen →
+# Automationen & Szenen → Automation erstellen → Neue Automation erstellen →
+# Menü (⋮) → „In YAML bearbeiten“ → diesen Inhalt einfügen → die mit
+# „<- anpassen“ markierten Entitäts-IDs ändern → Speichern.
+# Per Skript: python3 installieren.py --licht switch.led_kaffee
+alias: Licht an der Kaffeemaschine folgt der Kaffeemaschine
+description: Schaltet das Licht an der Kaffeemaschine zusammen mit der Maschine ein und aus.
+mode: restart
+triggers:
+  - trigger: state
+    entity_id: switch.kaffeevollautomat_einschalter  # <- anpassen
+    to: "on"
+    id: an
+  - trigger: state
+    entity_id: switch.kaffeevollautomat_einschalter  # <- anpassen
+    to: "off"
+    id: aus
+actions:
+  - if:
+      - condition: trigger
+        id: an
+    then:
+      # homeassistant.turn_on schaltet Lichter (light.…) und Steckdosen (switch.…).
+      - action: homeassistant.turn_on
+        target:
+          entity_id: switch.led_kaffee  # <- anpassen
+    else:
+      - action: homeassistant.turn_off
+        target:
+          entity_id: switch.led_kaffee  # <- anpassen

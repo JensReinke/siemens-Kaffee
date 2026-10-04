@@ -46,6 +46,7 @@ import installieren
 
 REPO = Path(__file__).resolve().parents[1]
 AUTOMATION_OHNE_BLUEPRINT = REPO / "beispiele" / "automation_ohne_blueprint.yaml"
+LICHT_FOLGT_KAFFEEMASCHINE = REPO / "beispiele" / "licht_folgt_kaffeemaschine.yaml"
 
 HOME_CONNECT = "home_connect"
 ALARMANLAGE = "alarm_control_panel.alarmanlage"
@@ -235,6 +236,7 @@ async def home_assistant(hass: HomeAssistant, tmp_path: Path) -> HomeAssistant:
     (tmp_path / "configuration.yaml").write_text("automation: !include automations.yaml\n")
     (tmp_path / "automations.yaml").write_text("[]\n")
     for komponente, config in (
+        ("homeassistant", {}),  # u. a. die Dienste homeassistant.turn_on/turn_off
         ("auth", {}),
         ("api", {}),
         ("websocket_api", {}),
@@ -804,6 +806,9 @@ async def test_angegebener_deaktivierter_einschalter_wird_aktiviert(
         ("--kaffeemaschine", "switch.gibt_es_nicht", "gibt es in Home Assistant nicht"),
         ("--kaffeemaschine", "light.kuche", "aus dem Bereich „switch“"),
         ("--alarmanlage", "light.kuche", "aus dem Bereich „alarm_control_panel“, „sensor“"),
+        ("--licht", "light.gibt_es_nicht", "gibt es in Home Assistant nicht"),
+        ("--licht", "sensor.kuche", "aus dem Bereich „light“, „switch“"),
+        ("--licht", KAFFEEMASCHINE, "ist der Einschalter der Kaffeemaschine selbst"),
     ],
 )
 async def test_angegebene_entitaet_wird_geprueft(
@@ -1160,6 +1165,192 @@ async def test_ueberspringen_der_aktivierung(
     assert "Soll ich eine davon aktivieren und als Alarmanlage verwenden?" in ausgabe
     assert er.async_get(home_assistant).async_get(VARIABLE).disabled_by is not None
     assert f"✓ Alarmanlage: {SYSTEMVARIABLE} („OpenCCU Alarmanlage“), unscharf = „Unscharf“" in ausgabe
+
+
+# --- Licht an der Maschine (--licht) -----------------------------------------
+
+HOMEMATIC = "homematicip_local"
+LICHT = "switch.led_kaffee"
+
+
+class Steckdose(SwitchEntity):
+    """Die Homematic-IP-Schaltsteckdose „LED Kaffee“ mit der LED-Leiste an der Maschine."""
+
+    _attr_should_poll = False
+
+    def __init__(self) -> None:
+        self._attr_name = "LED Kaffee"
+        self._attr_unique_id = "psm-main"
+        self._attr_is_on = False
+        self._attr_device_info = DeviceInfo(
+            identifiers={(HOMEMATIC, "psm")}, name="LED Kaffee", manufacturer="eQ-3", model="HMIP-PSM"
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self._attr_is_on = True
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self._attr_is_on = False
+        self.async_write_ha_state()
+
+
+@pytest.fixture
+def steckdose(hass: HomeAssistant) -> Iterator[Callable[..., Awaitable[None]]]:
+    """Eine Funktion, die Homematic(IP) Local mit der Steckdose „LED Kaffee“ nachspielt."""
+
+    class HomematicFlow(ConfigFlow):
+        """Nur damit Home Assistant den Konfigurationseintrag lädt."""
+
+    with mock_config_flow(HOMEMATIC, HomematicFlow):
+        yield partial(steckdose_einrichten, hass)
+
+
+async def steckdose_einrichten(hass: HomeAssistant, deaktiviert: bool = False) -> None:
+    """Legt die Steckdose „LED Kaffee“ (switch.led_kaffee) an – auf Wunsch deaktiviert."""
+
+    async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+        await hass.config_entries.async_forward_entry_setups(entry, ["switch"])
+        return True
+
+    async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+        return await hass.config_entries.async_unload_platforms(entry, ["switch"])
+
+    async def async_setup_switch(
+        hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    ) -> None:
+        async_add_entities([Steckdose()])
+
+    mock_integration(
+        hass,
+        MockModule(HOMEMATIC, async_setup_entry=async_setup_entry, async_unload_entry=async_unload_entry),
+    )
+    mock_platform(hass, f"{HOMEMATIC}.config_flow", None)
+    mock_platform(hass, f"{HOMEMATIC}.switch", MockPlatform(async_setup_entry=async_setup_switch))
+    eintrag = MockConfigEntry(domain=HOMEMATIC, title="RaspberryMatic")
+    eintrag.add_to_hass(hass)
+    if deaktiviert:
+        er.async_get(hass).async_get_or_create(
+            "switch",
+            HOMEMATIC,
+            "psm-main",
+            config_entry=eintrag,
+            suggested_object_id="led_kaffee",
+            disabled_by=er.RegistryEntryDisabler.USER,
+        )
+    assert await hass.config_entries.async_setup(eintrag.entry_id)
+    await hass.async_block_till_done()
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_licht_folgt_der_kaffeemaschine(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mit --licht geht die LED-Steckdose an der Maschine mit der Kaffeemaschine an und aus."""
+    await steckdose()
+    assert home_assistant.states.get(LICHT).state == "off"
+
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--probelauf"
+    )
+    assert code == 0, fehler
+    # Die Steckdose heißt zwar „Kaffee“, ist aber keine zweite Kaffeemaschine – keine Rückfrage.
+    assert f"✓ Kaffeemaschine: {KAFFEEMASCHINE}" in ausgabe
+    assert f"✓ Licht an der Maschine: {LICHT} („LED Kaffee“)" in ausgabe
+    assert f"✓ Automation angelegt: „{installieren.LICHT_ALIAS}“" in ausgabe
+    assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
+    assert "✓ Das Licht an der Maschine ist angegangen." in ausgabe
+    assert "Das Licht an der Maschine geht mit ihr an und aus." in ausgabe
+    assert home_assistant.states.get(LICHT).state == "on"
+
+    automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
+    assert set(automationen) == {installieren.AUTOMATION_ID, installieren.LICHT_AUTOMATION_ID}
+    assert automationen[installieren.LICHT_AUTOMATION_ID] == {
+        "id": installieren.LICHT_AUTOMATION_ID,
+        **installieren.licht_config(KAFFEEMASCHINE, LICHT),
+    }
+
+    # Maschine aus → Licht aus; Maschine an, egal wodurch → Licht an.
+    await home_assistant.services.async_call("switch", "turn_off", {"entity_id": KAFFEEMASCHINE}, blocking=True)
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(LICHT).state == "off"
+    await home_assistant.services.async_call("switch", "turn_on", {"entity_id": KAFFEEMASCHINE}, blocking=True)
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(LICHT).state == "on"
+
+    # Ein weiterer Aufruf ohne --licht lässt die Licht-Automation stehen.
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert len(gespeicherte_automationen(home_assistant)) == 2
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_deaktivierte_steckdose_wird_fuer_das_licht_aktiviert(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    await steckdose(deaktiviert=True)
+    assert home_assistant.states.get(LICHT) is None
+
+    with sofort_neuladen():
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT
+        )
+    assert code == 0, fehler
+    assert f"{LICHT} ist deaktiviert – wird aktiviert." in ausgabe
+    assert f"✓ {LICHT} aktiviert" in ausgabe
+    assert er.async_get(home_assistant).async_get(LICHT).disabled_by is None
+    assert home_assistant.states.get(LICHT).state == "off"
+    assert len(gespeicherte_automationen(home_assistant)) == 2
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_nicht_erreichbare_steckdose_wird_trotzdem_eingetragen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ist die Steckdose gerade ausgesteckt, warnt das Skript, legt die Automation aber an."""
+    home_assistant.states.async_set(LICHT, "unavailable", {"friendly_name": "LED Kaffee"})
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--probelauf"
+    )
+    assert code == 0, fehler
+    assert f"⚠ {LICHT} ist zurzeit nicht verfügbar" in ausgabe
+    assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
+    assert f"⚠ {LICHT} ist nicht mit angegangen" in ausgabe
+    assert len(gespeicherte_automationen(home_assistant)) == 2
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_nur_anzeigen_mit_licht(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--nur-anzeigen"
+    )
+    assert code == 0, fehler
+    assert "zweite Automation für das Licht" in ausgabe
+    assert '"action": "homeassistant.turn_on"' in ausgabe
+    assert gespeicherte_automationen(home_assistant) == []
+
+
+def test_licht_automation_wie_die_yaml_variante() -> None:
+    """Das Skript richtet exakt die Automation aus beispiele/licht_folgt_kaffeemaschine.yaml ein."""
+    erwartet = yaml.safe_load(LICHT_FOLGT_KAFFEEMASCHINE.read_text(encoding="utf-8"))
+    assert installieren.licht_config(KAFFEEMASCHINE, LICHT) == erwartet
 
 
 # --- Kleinkram ---------------------------------------------------------------
