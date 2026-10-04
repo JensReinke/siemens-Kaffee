@@ -80,8 +80,11 @@ ist. Es braucht nur Python 3, keine Zusatzpakete.
    Systemvariablen an) bietet es zum Aktivieren an und wartet dann, bis
    Home Assistant die Integration neu geladen hat.
 
-Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen.
-Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
+Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen,
+und übernimmt Alarmanlage, Zustand „unscharf“, Kaffeemaschine und Zeitfenster
+aus der vorhandenen Automation, soweit du nichts anderes angibst. So reicht
+z. B. `python3 installieren.py --licht switch.led_kaffee`, um nur das Licht zu
+ergänzen. Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
 
 | Option | Wirkung |
 | --- | --- |

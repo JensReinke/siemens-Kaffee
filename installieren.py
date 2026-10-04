@@ -5,7 +5,9 @@ unscharf geschaltet wird“ direkt in Home Assistant ein.
 Das Skript braucht nur Python 3, keine Zusatzpakete. Es spricht mit Home
 Assistant über dessen REST-API, sucht Alarmanlage und Kaffeemaschine
 (Home Connect) heraus, legt die Automation an und prüft, dass sie aktiv ist.
-Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen.
+Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen,
+und übernimmt Alarmanlage, Kaffeemaschine und Zeitfenster aus der vorhandenen
+Automation, soweit nichts anderes angegeben ist.
 
 Die Alarmanlage kann eine Alarmzentrale (alarm_control_panel) sein oder eine
 andere Entität, die ihren Zustand meldet – z. B. eine Systemvariable der
@@ -1042,6 +1044,47 @@ def automation_entitaet(
     return None
 
 
+def vorhandene_automation(ha: HomeAssistant) -> Optional[dict[str, Any]]:
+    """Die gespeicherte Konfiguration unserer Automation – oder None, wenn es sie noch nicht gibt."""
+    status, text = ha.anfrage("GET", f"/api/config/automation/config/{AUTOMATION_ID}")
+    if status != 200:
+        return None
+    try:
+        config = json.loads(text)
+    except ValueError:
+        return None
+    return config if isinstance(config, dict) else None
+
+
+def uebernehmen(config: dict[str, Any]) -> dict[str, Any]:
+    """Liest Alarmanlage, Zustand „unscharf“, Kaffeemaschine und Zeitfenster aus einer
+    gespeicherten Automation – nachsichtig, falls sie in Home Assistant bearbeitet wurde."""
+    werte: dict[str, Any] = {}
+    triggers = config.get("triggers") or []
+    if triggers and isinstance(triggers[0], dict):
+        anlagen = triggers[0].get("entity_id")
+        if isinstance(anlagen, str):
+            werte["alarmanlagen"] = [anlagen]
+        elif isinstance(anlagen, list) and anlagen and all(isinstance(a, str) for a in anlagen):
+            werte["alarmanlagen"] = anlagen
+        if isinstance(triggers[0].get("to"), str):
+            werte["unscharf"] = triggers[0]["to"]
+    for aktion in config.get("actions") or []:
+        if isinstance(aktion, dict) and aktion.get("action") == "switch.turn_on":
+            ziel = (aktion.get("target") or {}).get("entity_id")
+            if isinstance(ziel, str):
+                werte["kaffeemaschine"] = ziel
+                break
+    for bedingung in config.get("conditions") or []:
+        if isinstance(bedingung, dict) and bedingung.get("condition") == "time":
+            if isinstance(bedingung.get("after"), str) and isinstance(bedingung.get("before"), str):
+                try:
+                    werte["von"], werte["bis"] = uhrzeit(bedingung["after"]), uhrzeit(bedingung["before"])
+                except argparse.ArgumentTypeError:
+                    pass  # z. B. ein Template statt einer Uhrzeit – dann gilt der Standard
+    return werte
+
+
 def installieren(
     ha: HomeAssistant, config: dict[str, Any], automation_id: str = AUTOMATION_ID
 ) -> tuple[str, dict[str, Any]]:
@@ -1159,14 +1202,15 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--von",
         type=uhrzeit,
-        default=STANDARD_VON,
-        help=f"Anfang des Zeitfensters (Standard {STANDARD_VON})",
+        help=f"Anfang des Zeitfensters (Standard {STANDARD_VON}; bei einer vorhandenen Automation deren Wert)",
     )
     parser.add_argument(
         "--bis",
         type=uhrzeit,
-        default=STANDARD_BIS,
-        help=f"Ende des Zeitfensters, ausschließlich (Standard {STANDARD_BIS})",
+        help=(
+            f"Ende des Zeitfensters, ausschließlich (Standard {STANDARD_BIS}; bei einer vorhandenen "
+            "Automation deren Wert)"
+        ),
     )
     parser.add_argument(
         "--nur-anzeigen",
@@ -1231,11 +1275,24 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
         print(diagnose_ausfuehrlich(ha.register(), zustaende))
         return 0
 
+    # Eine vorhandene Automation gibt die Einstellungen vor – ein zweiter Aufruf
+    # (z. B. nur mit --licht) soll nicht alles neu erfragen.
+    vorhanden = uebernehmen(vorhandene_automation(ha) or {})
+    if vorhanden:
+        print(
+            f"✓ Die Automation „{ALIAS}“ gibt es schon – Alarmanlage, Kaffeemaschine und Zeitfenster "
+            "werden übernommen, soweit nichts anderes angegeben ist."
+        )
+    alte_anlagen = vorhanden.get("alarmanlagen", [])
+    uebernommen = False
     if args.alarmanlage:
         alarmanlagen = [
             entitaet_bereitstellen(ha, anlage, zustaende, ALARM_DOMAINS, "--alarmanlage")
             for anlage in args.alarmanlage
         ]
+    elif alte_anlagen and all(anlage in zustaende for anlage in alte_anlagen):
+        alarmanlagen = alte_anlagen
+        uebernommen = True
     else:
         kandidaten = kandidaten_alarmanlage(zustaende)
         hinweis = (
@@ -1259,7 +1316,12 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
                 hinweis,
                 mehrere=True,
             )
-    unscharf = unscharf_bestimmen(alarmanlagen, zustaende, args.unscharf, interaktiv)
+    unscharf = unscharf_bestimmen(
+        alarmanlagen,
+        zustaende,
+        args.unscharf or (vorhanden.get("unscharf") if uebernommen else None),
+        interaktiv,
+    )
     print(
         "✓ Alarmanlage: "
         + ", ".join(f"{anlage} („{name_von(zustaende[anlage])}“)" for anlage in alarmanlagen)
@@ -1270,6 +1332,8 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
         kaffeemaschine = entitaet_bereitstellen(
             ha, args.kaffeemaschine, zustaende, ("switch",), "--kaffeemaschine"
         )
+    elif vorhanden.get("kaffeemaschine") in zustaende:
+        kaffeemaschine = vorhanden["kaffeemaschine"]
     else:
         kandidaten, deaktiviert, hinweis = kandidaten_kaffeemaschine(ha.register(), zustaende)
         gewaehlt: list[str] = []
@@ -1311,7 +1375,9 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
                 "und in der Zentrale erreichbar? Die Automation wird trotzdem angelegt."
             )
 
-    config = automation_config(alarmanlagen, kaffeemaschine, args.von, args.bis, unscharf)
+    von = args.von or vorhanden.get("von") or uhrzeit(STANDARD_VON)
+    bis = args.bis or vorhanden.get("bis") or uhrzeit(STANDARD_BIS)
+    config = automation_config(alarmanlagen, kaffeemaschine, von, bis, unscharf)
     licht_konfig = licht_config(kaffeemaschine, licht) if licht else None
     if args.nur_anzeigen:
         print("\nDiese Automation würde eingerichtet (nichts geändert):")
@@ -1326,7 +1392,7 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
     print(
         f"✓ Automation {ergebnis}: „{ALIAS}“\n"
         f"  {automation['entity_id']}, {'aktiv' if aktiv else 'NICHT aktiv: ' + automation['state']}, "
-        f"Zeitfenster {args.von[:5]}–{args.bis[:5]} Uhr"
+        f"Zeitfenster {von[:5]}–{bis[:5]} Uhr"
     )
     if not aktiv:
         raise Abbruch("Die Automation ist nicht aktiv. Details zeigt ihre Ablaufverfolgung in Home Assistant.")
