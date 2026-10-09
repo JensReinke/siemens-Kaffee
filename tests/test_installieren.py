@@ -47,11 +47,13 @@ import installieren
 REPO = Path(__file__).resolve().parents[1]
 AUTOMATION_OHNE_BLUEPRINT = REPO / "beispiele" / "automation_ohne_blueprint.yaml"
 LICHT_FOLGT_KAFFEEMASCHINE = REPO / "beispiele" / "licht_folgt_kaffeemaschine.yaml"
+LICHT_WENN_DUNKEL = REPO / "beispiele" / "licht_folgt_kaffeemaschine_wenn_dunkel.yaml"
 
 HOME_CONNECT = "home_connect"
 ALARMANLAGE = "alarm_control_panel.alarmanlage"
 KAFFEEMASCHINE = "switch.kaffeevollautomat_einschalter"
 GESCHIRRSPUELER = "switch.geschirrspuler_einschalter"
+HELLIGKEIT = "sensor.kueche_helligkeit"  # der Lux-Wert des Bewegungsmelders in der Küche
 BERLIN = ZoneInfo("Europe/Berlin")
 
 
@@ -889,6 +891,7 @@ async def test_angegebener_deaktivierter_einschalter_wird_aktiviert(
         ("--licht", "light.gibt_es_nicht", "gibt es in Home Assistant nicht"),
         ("--licht", "sensor.kuche", "aus dem Bereich „light“, „switch“"),
         ("--licht", KAFFEEMASCHINE, "ist der Einschalter der Kaffeemaschine selbst"),
+        ("--dunkel", HELLIGKEIT, "--dunkel braucht ein Licht an der Maschine: bitte --licht"),
     ],
 )
 async def test_angegebene_entitaet_wird_geprueft(
@@ -1433,6 +1436,350 @@ def test_licht_automation_wie_die_yaml_variante() -> None:
     assert installieren.licht_config(KAFFEEMASCHINE, LICHT) == erwartet
 
 
+# --- Licht nur bei Dunkelheit (--dunkel) -------------------------------------
+
+
+def helligkeit(
+    hass: HomeAssistant, wert: str, entity_id: str = HELLIGKEIT, name: str = "Helligkeit Küche"
+) -> None:
+    """Ein Helligkeitssensor wie der des Bewegungsmelders – der Zustand ist in Home Assistant Text."""
+    hass.states.async_set(
+        entity_id, wert, {"device_class": "illuminance", "unit_of_measurement": "lx", "friendly_name": name}
+    )
+
+
+async def maschine(hass: HomeAssistant, an: bool) -> None:
+    """Schaltet die Kaffeemaschine wie von Hand und wartet, bis die Automationen durch sind."""
+    await hass.services.async_call(
+        "switch", "turn_on" if an else "turn_off", {"entity_id": KAFFEEMASCHINE}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+
+def keine_rueckfrage() -> Any:
+    return patch("builtins.input", side_effect=AssertionError("Es darf keine Rückfrage geben"))
+
+
+def test_licht_automation_bei_dunkelheit_wie_die_yaml_variante() -> None:
+    """Mit --dunkel richtet das Skript exakt beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml ein."""
+    erwartet = yaml.safe_load(LICHT_WENN_DUNKEL.read_text(encoding="utf-8"))
+    assert installieren.licht_config(KAFFEEMASCHINE, LICHT, HELLIGKEIT, 20) == erwartet
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_licht_nur_bei_dunkelheit(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Das Licht geht nur an, wenn der Sensor höchstens 20 lx meldet, und aus, wenn es hell wird."""
+    await steckdose()
+    helligkeit(home_assistant, "250")
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel", HELLIGKEIT
+    )
+    assert code == 0, fehler
+    assert (
+        f"✓ Dunkel-Sensor: {HELLIGKEIT} („Helligkeit Küche“), aktuell 250 lx – heller als 20 lx bleibt das Licht aus"
+        in ausgabe
+    )
+    assert "Das Licht an der Maschine geht mit ihr aus – und an, wenn es dunkel ist." in ausgabe
+    automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
+    assert automationen[installieren.LICHT_AUTOMATION_ID] == {
+        "id": installieren.LICHT_AUTOMATION_ID,
+        **installieren.licht_config(KAFFEEMASCHINE, LICHT, HELLIGKEIT, 20),
+    }
+
+    # Hell: Die Maschine geht an, das Licht bleibt aus.
+    await maschine(home_assistant, True)
+    assert home_assistant.states.get(LICHT).state == "off"
+    # Es wird dunkel: Licht an. Es wird hell: Licht aus. Wieder dunkel: wieder an.
+    helligkeit(home_assistant, "5")
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(LICHT).state == "on"
+    helligkeit(home_assistant, "300")
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(LICHT).state == "off"
+    helligkeit(home_assistant, "3")
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(LICHT).state == "on"
+    # Maschine aus: Licht aus, egal wie dunkel.
+    await maschine(home_assistant, False)
+    assert home_assistant.states.get(LICHT).state == "off"
+    # Ohne brauchbaren Messwert gilt dunkel – das Licht geht wie bisher mit an.
+    for wert in ("unknown", "unavailable", "N/A"):
+        helligkeit(home_assistant, wert)
+        await maschine(home_assistant, True)
+        assert home_assistant.states.get(LICHT).state == "on", wert
+        await maschine(home_assistant, False)
+        assert home_assistant.states.get(LICHT).state == "off", wert
+    home_assistant.states.async_remove(HELLIGKEIT)
+    await maschine(home_assistant, True)
+    assert home_assistant.states.get(LICHT).state == "on"
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_dunkel_sensor_wird_gefunden(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--dunkel ohne Wert nimmt den einzigen Helligkeitssensor von selbst, ohne Rückfrage."""
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    helligkeit(home_assistant, "12", "sensor.flur_illumination", "Flur Illumination")
+    with patch.object(sys.stdin, "isatty", return_value=True), keine_rueckfrage():
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel"
+        )
+    assert code == 0, fehler
+    assert "✓ Dunkel-Sensor: sensor.flur_illumination („Flur Illumination“), aktuell 12 lx" in ausgabe
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_dunkel_sensor_kueche_wird_bevorzugt(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Gibt es genau einen Helligkeitssensor aus der Küche, wird er ohne Rückfrage genommen."""
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    helligkeit(home_assistant, "40", "sensor.flur_illumination", "Flur Illumination")
+    helligkeit(home_assistant, "8", "sensor.bewegungsmelder_kuche_illumination", "Bewegungsmelder Küche Illumination")
+    home_assistant.states.async_set(
+        "sensor.garten_helligkeit", "900", {"unit_of_measurement": "lux", "friendly_name": "Garten Helligkeit"}
+    )
+    with patch.object(sys.stdin, "isatty", return_value=True), keine_rueckfrage():
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel"
+        )
+    assert code == 0, fehler
+    assert (
+        "✓ Dunkel-Sensor: sensor.bewegungsmelder_kuche_illumination („Bewegungsmelder Küche Illumination“), "
+        "aktuell 8 lx" in ausgabe
+    )
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_mehrere_dunkel_sensoren_im_terminal_waehlen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Zwei Küchen-Sensoren: ohne Terminal eine klare Meldung, im Terminal ein Menü."""
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    helligkeit(home_assistant, "9", "sensor.kueche_average_illumination", "Küche Average Illumination")
+    helligkeit(home_assistant, "8", "sensor.kueche_illumination", "Küche Illumination")
+
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel"
+    )
+    assert code == 1
+    assert "Mehrere Möglichkeiten für den Helligkeitssensor gefunden" in fehler
+    assert "1) sensor.kueche_illumination" in fehler  # der Hauptwert vor dem Mittelwert
+    assert "2) sensor.kueche_average_illumination" in fehler
+    assert "--dunkel <entity_id>" in fehler
+    assert gespeicherte_automationen(home_assistant) == []
+
+    with (
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=["2"]),
+    ):
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel"
+        )
+    assert code == 0, fehler
+    assert "✓ Dunkel-Sensor: sensor.kueche_average_illumination" in ausgabe
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_kein_dunkel_sensor(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel"
+    )
+    assert code == 1
+    assert "Kein Helligkeitssensor in Home Assistant gefunden" in fehler
+    assert "Geräteklasse „illuminance“ oder Einheit lx" in fehler
+    assert "--dunkel <entity_id>" in fehler
+    assert gespeicherte_automationen(home_assistant) == []
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+@pytest.mark.parametrize(
+    ("wert", "meldung"),
+    [
+        ("sensor.gibt_es_nicht", "gibt es in Home Assistant nicht"),
+        (LICHT, "aus dem Bereich „sensor“"),
+        ("20", "--dunkel-unter 20"),
+    ],
+)
+async def test_angegebener_dunkel_sensor_wird_geprueft(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+    wert: str,
+    meldung: str,
+) -> None:
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel", wert
+    )
+    assert code == 1
+    assert meldung in fehler
+    assert gespeicherte_automationen(home_assistant) == []
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_dunkel_schwelle(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--dunkel-unter setzt die Schwelle, auch mit Komma; sie landet als Zahl in der Automation."""
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    helligkeit(home_assistant, "6")
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token,
+        "--licht", LICHT, "--dunkel", HELLIGKEIT, "--dunkel-unter", "5",
+    )
+    assert code == 0, fehler
+    assert "aktuell 6 lx – heller als 5 lx bleibt das Licht aus" in ausgabe
+    automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
+    assert automationen[installieren.LICHT_AUTOMATION_ID] == {
+        "id": installieren.LICHT_AUTOMATION_ID,
+        **installieren.licht_config(KAFFEEMASCHINE, LICHT, HELLIGKEIT, 5),
+    }
+    assert automationen[installieren.LICHT_AUTOMATION_ID]["triggers"][2]["above"] == 5
+
+    # Zweiter Aufruf nur mit neuer Schwelle: Licht und Sensor werden übernommen.
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--dunkel-unter", "7,5"
+    )
+    assert code == 0, fehler
+    assert "heller als 7.5 lx bleibt das Licht aus" in ausgabe
+    automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
+    assert automationen[installieren.LICHT_AUTOMATION_ID]["triggers"][2]["above"] == 7.5
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_zweiter_aufruf_uebernimmt_licht_und_dunkel(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Licht, Dunkel-Sensor und Schwelle kommen beim nächsten Aufruf aus der Licht-Automation."""
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    helligkeit(home_assistant, "4")
+
+    def licht_automation() -> dict[str, Any]:
+        [automation] = [
+            a for a in gespeicherte_automationen(home_assistant) if a["id"] == installieren.LICHT_AUTOMATION_ID
+        ]
+        return automation
+
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token,
+        "--licht", LICHT, "--dunkel", "--dunkel-unter", "10",
+    )
+    assert code == 0, fehler
+    vorher = licht_automation()
+    assert vorher["triggers"][2] == {"trigger": "numeric_state", "entity_id": HELLIGKEIT, "above": 10, "id": "hell"}
+
+    # Ohne Optionen: keine Rückfrage, nichts geändert.
+    with patch.object(sys.stdin, "isatty", return_value=True), keine_rueckfrage():
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert "✓ Die Licht-Automation gibt es schon – Licht, Dunkel-Sensor und Schwelle werden übernommen" in ausgabe
+    assert f"✓ Licht an der Maschine: {LICHT}" in ausgabe
+    assert f"✓ Dunkel-Sensor: {HELLIGKEIT}" in ausgabe
+    assert "heller als 10 lx" in ausgabe
+    assert licht_automation() == vorher
+
+    # Nur die Schwelle ändern.
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--dunkel-unter", "30")
+    assert code == 0, fehler
+    assert licht_automation() == {
+        "id": installieren.LICHT_AUTOMATION_ID,
+        **installieren.licht_config(KAFFEEMASCHINE, LICHT, HELLIGKEIT, 30),
+    }
+
+    # Dunkel-Bedingung wieder entfernen.
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--dunkel", "aus")
+    assert code == 0, fehler
+    assert "Das Licht an der Maschine geht mit ihr an und aus." in ausgabe
+    assert licht_automation() == {"id": installieren.LICHT_AUTOMATION_ID, **installieren.licht_config(KAFFEEMASCHINE, LICHT)}
+
+    # Und wieder dazu, mit Standardschwelle.
+    with patch.object(sys.stdin, "isatty", return_value=True), keine_rueckfrage():
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--dunkel")
+    assert code == 0, fehler
+    assert f"✓ Dunkel-Sensor: {HELLIGKEIT}" in ausgabe
+    assert "heller als 20 lx" in ausgabe
+
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--dunkel", "aus", "--dunkel-unter", "5"
+    )
+    assert code == 1
+    assert "--dunkel aus und --dunkel-unter passen nicht zusammen" in fehler
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_probelauf_bei_helligkeit(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ist es beim Probelauf hell, bleibt das Licht aus – und das Skript sagt, dass das so gehört."""
+    await steckdose()
+    helligkeit(home_assistant, "250")
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token,
+        "--licht", LICHT, "--dunkel", HELLIGKEIT, "--probelauf",
+    )
+    assert code == 0, fehler
+    assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
+    assert (
+        f"ℹ Es ist hell ({HELLIGKEIT}: 250 lx, Licht nur bis 20 lx) – das Licht bleibt aus, so soll es sein."
+        in ausgabe
+    )
+    assert "⚠" not in ausgabe
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
+    assert home_assistant.states.get(LICHT).state == "off"
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_nur_anzeigen_mit_dunkel(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    helligkeit(home_assistant, "1")
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel", "--nur-anzeigen"
+    )
+    assert code == 0, fehler
+    assert '"above": 20' in ausgabe
+    assert '"stop": "Es ist hell – das Licht bleibt aus."' in ausgabe
+    assert gespeicherte_automationen(home_assistant) == []
+
+
 # --- Kleinkram ---------------------------------------------------------------
 
 
@@ -1499,3 +1846,29 @@ def test_ungueltige_uhrzeit(eingabe: str) -> None:
 )
 def test_url_bereinigen(eingabe: str, erwartet: str) -> None:
     assert installieren.url_bereinigen(eingabe) == erwartet
+
+
+def test_licht_uebernehmen_ist_nachsichtig() -> None:
+    """Auch eine bearbeitete Licht-Automation liefert, was noch lesbar ist."""
+    mit = installieren.licht_config(KAFFEEMASCHINE, LICHT, HELLIGKEIT, 12.5)
+    assert installieren.licht_uebernehmen(mit) == {"licht": LICHT, "dunkel": HELLIGKEIT, "dunkel_unter": 12.5}
+    assert installieren.licht_uebernehmen(installieren.licht_config(KAFFEEMASCHINE, LICHT)) == {"licht": LICHT}
+    mit["actions"][0]["choose"][1]["conditions"][1]["above"] = "20"  # von Hand: Text statt Zahl
+    assert installieren.licht_uebernehmen(mit) == {"licht": LICHT}
+    assert installieren.licht_uebernehmen({"actions": "kaputt"}) == {}
+    assert installieren.licht_uebernehmen({}) == {}
+
+
+@pytest.mark.parametrize(
+    ("eingabe", "erwartet"),
+    [("20", 20), ("20.5", 20.5), ("7,5", 7.5), ("20 lx", 20), ("0", 0), (" 15 Lux ", 15)],
+)
+def test_lux(eingabe: str, erwartet: "int | float") -> None:
+    assert installieren.lux(eingabe) == erwartet
+    assert type(installieren.lux(eingabe)) is type(erwartet)  # 20, nicht 20.0 – sonst stünde 20.0 in der Automation
+
+
+@pytest.mark.parametrize("eingabe", ["dunkel", "-5", "", "nan", "inf", "sensor.x"])
+def test_ungueltiger_lux(eingabe: str) -> None:
+    with pytest.raises(Exception, match="Lux"):
+        installieren.lux(eingabe)

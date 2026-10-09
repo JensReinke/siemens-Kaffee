@@ -82,9 +82,12 @@ ist. Es braucht nur Python 3, keine Zusatzpakete.
 
 Ein zweiter Aufruf aktualisiert die Automation, statt sie doppelt anzulegen,
 und übernimmt Alarmanlage, Zustand „unscharf“, Kaffeemaschine und Zeitfenster
-aus der vorhandenen Automation, soweit du nichts anderes angibst. So reicht
-z. B. `python3 installieren.py --licht switch.led_kaffee`, um nur das Licht zu
-ergänzen. Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
+aus der vorhandenen Automation sowie Licht, Dunkel-Sensor und Schwelle aus der
+Licht-Automation, soweit du nichts anderes angibst. So reicht z. B.
+`python3 installieren.py --licht switch.led_kaffee`, um nur das Licht zu
+ergänzen, und danach `python3 installieren.py --dunkel`, um es nur noch bei
+Dunkelheit zu schalten. Nützliche Optionen (`python3 installieren.py --hilfe`
+zeigt alle):
 
 | Option | Wirkung |
 | --- | --- |
@@ -95,12 +98,16 @@ ergänzen. Nützliche Optionen (`python3 installieren.py --hilfe` zeigt alle):
 | `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen; `--alarmanlage` auch mehrfach, eine deaktivierte Entität wird dabei aktiviert. |
 | `--unscharf Unscharf` | Zustand, der „unscharf“ bedeutet, wenn die Alarmanlage keine Alarmzentrale ist. |
 | `--licht switch.led_kaffee` | Ein Licht oder eine Steckdose an der Maschine (`light.…` oder `switch.…`) geht in einer zweiten Automation mit der Kaffeemaschine an und aus – egal ob die Automation, Home Assistant oder jemand am Gerät sie einschaltet. Eine deaktivierte Entität wird dabei aktiviert. |
+| `--dunkel` | Das Licht geht nur an, wenn es dunkel ist. Ohne Wert sucht das Skript einen Helligkeitssensor (Geräteklasse „illuminance“ oder Einheit lx), bevorzugt einen aus der Küche, etwa den des Bewegungsmelders; sonst `--dunkel sensor.…`. `--dunkel aus` entfernt die Bedingung wieder. |
+| `--dunkel-unter 20` | Bis zu welcher Helligkeit es „dunkel“ ist (Standard 20 lx). Darüber bleibt das Licht aus bzw. geht aus, sobald es hell wird. |
 | `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
 
 Das Skript legt die Automation ohne Blueprint an (wie in
 [`beispiele/automation_ohne_blueprint.yaml`](beispiele/automation_ohne_blueprint.yaml);
 mit `--licht` zusätzlich
-[`beispiele/licht_folgt_kaffeemaschine.yaml`](beispiele/licht_folgt_kaffeemaschine.yaml)).
+[`beispiele/licht_folgt_kaffeemaschine.yaml`](beispiele/licht_folgt_kaffeemaschine.yaml),
+mit `--dunkel`
+[`beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml`](beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml)).
 Sie lässt sich danach ganz normal unter **Einstellungen → Automationen &
 Szenen** bearbeiten.
 
@@ -109,6 +116,13 @@ nicht schalten: Home Connect meldet sie nur als Zustand, nicht als
 Einstellung, und auch im Gerätemenü gibt es dafür keine Option. `--licht`
 ist für ein zusätzliches Licht an der Maschine gedacht, z. B. eine
 LED-Leiste an einer Homematic-Schaltsteckdose.
+
+Mit `--dunkel` geht dieses Licht nur an, wenn ein Helligkeitssensor – etwa der
+Lux-Wert des Bewegungsmelders in der Küche – höchstens 20 lx meldet, und aus,
+sobald es heller wird. Ausschalten folgt der Maschine immer. Liefert der
+Sensor gerade keinen Wert, gilt es als dunkel, das Licht geht also wie ohne
+Sensor an. Homematic-Bewegungsmelder aktualisieren die Helligkeit nur bei
+Bewegung bzw. in Abständen; es zählt der zuletzt gemeldete Wert.
 
 ## Einrichten mit Blueprint
 
@@ -206,6 +220,7 @@ Warum die Automation (nicht) gelaufen ist, zeigt ihre **Ablaufverfolgung**
 | [`blueprints/automation/siemens_kaffee/kaffeemaschine_bei_unscharf.yaml`](blueprints/automation/siemens_kaffee/kaffeemaschine_bei_unscharf.yaml) | Blueprint |
 | [`beispiele/automation_ohne_blueprint.yaml`](beispiele/automation_ohne_blueprint.yaml) | Dieselbe Automation ohne Blueprint |
 | [`beispiele/licht_folgt_kaffeemaschine.yaml`](beispiele/licht_folgt_kaffeemaschine.yaml) | Zweite Automation (optional): Licht an der Maschine folgt der Kaffeemaschine |
+| [`beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml`](beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml) | Dieselbe zweite Automation, aber nur bei Dunkelheit (Helligkeitssensor) |
 | [`installieren.py`](installieren.py) | Richtet die Automation per Befehl in Home Assistant ein |
 | [`tests/`](tests/) | Automatische Tests |
 

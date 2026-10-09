@@ -1,0 +1,57 @@
+# Variante der zweiten Automation: Das Licht an der Kaffeemaschine geht nur mit
+# an, wenn es dunkel ist – gemessen am Helligkeitssensor (Lux), z. B. dem des
+# Bewegungsmelders in der Küche. Heller als 20 lx: Licht bleibt aus bzw. geht
+# aus. Ohne Messwert (unknown, unavailable) gilt es als dunkel. Ausschalten
+# folgt der Maschine immer.
+# Einfügen wie beispiele/automation_ohne_blueprint.yaml: die mit „<- anpassen“
+# markierten Entitäts-IDs und die Schwelle (above/below: 20) ändern.
+# Per Skript: python3 installieren.py --licht switch.led_kaffee --dunkel
+alias: Licht an der Kaffeemaschine folgt der Kaffeemaschine
+description: Schaltet das Licht an der Kaffeemaschine mit der Maschine aus – und ein, wenn es dabei dunkel ist (sensor.kueche_helligkeit höchstens 20 lx).
+mode: restart
+triggers:
+  - trigger: state
+    entity_id: switch.kaffeevollautomat_einschalter  # <- anpassen
+    to: "on"
+    id: an
+  - trigger: state
+    entity_id: switch.kaffeevollautomat_einschalter  # <- anpassen
+    to: "off"
+    id: aus
+  - trigger: numeric_state
+    entity_id: sensor.kueche_helligkeit  # <- anpassen
+    above: 20
+    id: hell
+  - trigger: numeric_state
+    entity_id: sensor.kueche_helligkeit  # <- anpassen
+    below: 20
+    id: dunkel
+actions:
+  - choose:
+      # Maschine aus oder hell geworden: Licht aus.
+      - conditions:
+          - condition: trigger
+            id: [aus, hell]
+        sequence:
+          - action: homeassistant.turn_off
+            target:
+              entity_id: switch.led_kaffee  # <- anpassen
+      # Maschine an, aber heller als 20 lx: Licht bleibt aus.
+      - conditions:
+          - condition: state
+            entity_id: switch.kaffeevollautomat_einschalter  # <- anpassen
+            state: "on"
+          - condition: numeric_state
+            entity_id: sensor.kueche_helligkeit  # <- anpassen
+            above: 20
+        sequence:
+          - stop: Es ist hell – das Licht bleibt aus.
+      # Maschine an und dunkel (oder kein Messwert): Licht an.
+      - conditions:
+          - condition: state
+            entity_id: switch.kaffeevollautomat_einschalter  # <- anpassen
+            state: "on"
+        sequence:
+          - action: homeassistant.turn_on
+            target:
+              entity_id: switch.led_kaffee  # <- anpassen
