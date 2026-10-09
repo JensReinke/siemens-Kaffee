@@ -91,7 +91,7 @@ zeigt alle):
 
 | Option | Wirkung |
 | --- | --- |
-| `--probelauf` | Löst die Automation nach dem Einrichten einmal aus – die Kaffeemaschine geht wirklich an. |
+| `--probelauf` | Löst die Automation nach dem Einrichten einmal aus – die Kaffeemaschine geht wirklich an und danach wieder aus (`--anlassen` lässt sie an). Mit `--licht` zeigt der Probelauf auch, ob das Licht mitgeht. |
 | `--nur-anzeigen` | Zeigt nur, was eingerichtet würde, ändert nichts. |
 | `--diagnose` | Zeigt nur, was Home Assistant über Home Connect und Hausgeräte weiß (Integrationen mit Zustand, Geräte, alle Entitäten), zur Fehlersuche. |
 | `--von 6:00 --bis 10:00` | Anderes Zeitfenster. |
