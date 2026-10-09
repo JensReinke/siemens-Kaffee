@@ -98,7 +98,7 @@ zeigt alle):
 | `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen; `--alarmanlage` auch mehrfach, eine deaktivierte Entität wird dabei aktiviert. |
 | `--unscharf Unscharf` | Zustand, der „unscharf“ bedeutet, wenn die Alarmanlage keine Alarmzentrale ist. |
 | `--licht switch.led_kaffee` | Ein Licht oder eine Steckdose an der Maschine (`light.…` oder `switch.…`) geht in einer zweiten Automation mit der Kaffeemaschine an und aus – egal ob die Automation, Home Assistant oder jemand am Gerät sie einschaltet. Eine deaktivierte Entität wird dabei aktiviert. |
-| `--dunkel` | Das Licht geht nur an, wenn es dunkel ist. Ohne Wert sucht das Skript einen Helligkeitssensor (Geräteklasse „illuminance“ oder Einheit lx), bevorzugt einen aus der Küche, etwa den des Bewegungsmelders; sonst `--dunkel sensor.…`. `--dunkel aus` entfernt die Bedingung wieder. |
+| `--dunkel` | Das Licht geht nur an, wenn es dunkel ist. Ohne Wert sucht das Skript einen Helligkeitssensor (Geräteklasse „illuminance“ oder Einheit lx), bevorzugt einen aus der Küche, etwa den des Bewegungsmelders; deaktivierte Helligkeitssensoren bietet es zum Aktivieren an. Sonst `--dunkel sensor.…`. `--dunkel aus` entfernt die Bedingung wieder. |
 | `--dunkel-unter 20` | Bis zu welcher Helligkeit es „dunkel“ ist (Standard 20 lx). Darüber bleibt das Licht aus bzw. geht aus, sobald es hell wird. |
 | `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
 
@@ -122,7 +122,11 @@ Lux-Wert des Bewegungsmelders in der Küche – höchstens 20 lx meldet, und aus
 sobald es heller wird. Ausschalten folgt der Maschine immer. Liefert der
 Sensor gerade keinen Wert, gilt es als dunkel, das Licht geht also wie ohne
 Sensor an. Homematic-Bewegungsmelder aktualisieren die Helligkeit nur bei
-Bewegung bzw. in Abständen; es zählt der zuletzt gemeldete Wert.
+Bewegung bzw. in Abständen; es zählt der zuletzt gemeldete Wert. Ist die
+Helligkeit des Melders in Home Assistant deaktiviert (so legt Homematic(IP)
+Local sie oft an), bietet das Skript sie zum Aktivieren an. Ältere
+Homematic-Melder melden ihre Helligkeit ohne Lux-Einheit auf einer Skala
+von 0 bis 255; dann gilt `--dunkel-unter` in dieser Skala.
 
 ## Einrichten mit Blueprint
 

@@ -68,6 +68,17 @@ LUX_EINHEITEN = ("lx", "lux")
 KUECHE = re.compile(r"k(?:ü|ue|u)che|kitchen", re.IGNORECASE)  # „kuche“: so schreibt HA Küche in IDs
 # Homematic-Bewegungsmelder liefern neben der Helligkeit auch Mittel-/Minimal-/Maximalwerte.
 NEBENWERTE = re.compile(r"average|lowest|highest|current|mittel|minim|maxim", re.IGNORECASE)
+# Woran man einen Helligkeitssensor am Namen erkennt – nötig für deaktivierte
+# Entitäten (das Register kennt weder Geräteklasse noch Einheit) und für ältere
+# Homematic-Melder, deren Helligkeit (0–255) keine Einheit hat.
+HELLIGKEIT_WOERTER = re.compile(
+    r"beleuchtungsst|illuminat|helligkeit|brightness|light_?level|(?<![a-z])lux(?![a-z])", re.IGNORECASE
+)
+HELLIGKEIT_HINWEIS = (
+    "Gesucht wird ein Sensor mit Geräteklasse „illuminance“ oder Einheit lx – z. B. die Helligkeit "
+    "des Bewegungsmelders in der Küche (Homematic IP: „Beleuchtungsstärke“) – oder ein Sensor, der "
+    "„Helligkeit“, „Beleuchtungsstärke“ oder „Illumination“ heißt und eine Zahl meldet."
+)
 HOME_CONNECT_ANLEITUNG = "https://github.com/JensReinke/siemens-Kaffee#home-connect-einrichten"
 STANDARD_URL = "http://homeassistant.local:8123"
 STANDARD_VON = "05:00"
@@ -633,13 +644,32 @@ def kandidaten_alarmanlage(zustaende: dict[str, dict[str, Any]]) -> list[tuple[s
     ]
 
 
-def ist_helligkeitssensor(entity_id: str, zustand: dict[str, Any]) -> bool:
+def ist_lux_sensor(entity_id: str, zustand: dict[str, Any]) -> bool:
     """Ein Sensor mit Geräteklasse „illuminance“ oder Einheit Lux."""
     attribute = zustand.get("attributes", {})
     return entity_id.startswith("sensor.") and (
         attribute.get("device_class") == "illuminance"
         or str(attribute.get("unit_of_measurement", "")).lower() in LUX_EINHEITEN
     )
+
+
+def ist_helligkeitssensor(entity_id: str, zustand: dict[str, Any]) -> bool:
+    """Ein Lux-Sensor – oder ein Sensor, der nach Helligkeit heißt und eine Zahl meldet
+    (ältere Homematic-Melder melden ihre Helligkeit 0–255 ohne Einheit)."""
+    return ist_lux_sensor(entity_id, zustand) or (
+        entity_id.startswith("sensor.")
+        and bool(HELLIGKEIT_WOERTER.search(f"{entity_id} {name_von(zustand)}"))
+        and helligkeit(zustand) is not None
+    )
+
+
+def einheit_von(zustand: dict[str, Any]) -> str:
+    return str(zustand.get("attributes", {}).get("unit_of_measurement") or "")
+
+
+def mit_einheit(wert: "int | float", zustand: dict[str, Any]) -> str:
+    """„20 lx“ – oder nur „20“, wenn der Sensor keine Einheit hat."""
+    return f"{wert:g} {einheit_von(zustand)}".strip()
 
 
 def helligkeit(zustand: dict[str, Any]) -> Optional[float]:
@@ -655,8 +685,7 @@ def helligkeit_text(zustand: dict[str, Any]) -> str:
     wert = helligkeit(zustand)
     if wert is None:
         return "zurzeit kein Wert"
-    einheit = zustand.get("attributes", {}).get("unit_of_measurement") or "lx"
-    return f"{wert:g} {einheit}"
+    return mit_einheit(wert, zustand)
 
 
 def ist_kueche(entity_id: str, name: str = "") -> bool:
@@ -681,6 +710,29 @@ def kandidaten_helligkeit(zustaende: dict[str, dict[str, Any]]) -> list[tuple[st
         (entity_id, f"„{name_von(zustand)}“, aktuell {helligkeit_text(zustand)}")
         for entity_id, zustand in treffer
     ]
+
+
+def deaktivierte_helligkeitssensoren(register: "Register") -> list[str]:
+    """Deaktivierte Sensoren, die nach Helligkeit heißen – Küche zuerst, Nebenwerte zuletzt.
+
+    Homematic(IP) Local legt die Helligkeit eines Bewegungsmelders oft so an.
+    Das Register kennt weder Geräteklasse noch Einheit, also zählt nur der Name.
+    """
+    treffer = [
+        (entitaet["entity_id"], register.entitaetsname(entitaet))
+        for entitaet in register.entitaeten.values()
+        if entitaet.get("disabled_by")
+        and entitaet["entity_id"].startswith("sensor.")
+        and HELLIGKEIT_WOERTER.search(f"{entitaet['entity_id']} {register.entitaetsname(entitaet)}")
+    ]
+    treffer.sort(
+        key=lambda paar: (
+            not ist_kueche(*paar),
+            bool(NEBENWERTE.search(f"{paar[0]} {paar[1]}")),
+            paar[0],
+        )
+    )
+    return [entity_id for entity_id, _ in treffer]
 
 
 def deaktivierte_alarm_entitaeten(register: "Register") -> list[str]:
@@ -1284,8 +1336,8 @@ def hell_hinweis(ha: HomeAssistant, dunkel: str, dunkel_unter: "int | float") ->
     if wert is None or wert <= dunkel_unter:
         return None
     return (
-        f"ℹ Es ist hell ({dunkel}: {helligkeit_text(zustand)}, Licht nur bis {dunkel_unter:g} lx) – "
-        "das Licht bleibt aus, so soll es sein."
+        f"ℹ Es ist hell ({dunkel}: {helligkeit_text(zustand)}, Licht nur bis "
+        f"{mit_einheit(dunkel_unter, zustand)}) – das Licht bleibt aus, so soll es sein."
     )
 
 
@@ -1494,17 +1546,30 @@ def dunkel_bestimmen(
     if suchen:
         kandidaten = kandidaten_helligkeit(zustaende)
         kueche = [k for k in kandidaten if ist_kueche(k[0], name_von(zustaende[k[0]]))]
-        if len(kueche) == 1:
-            kandidaten = kueche
-        [dunkel] = auswaehlen(
-            kandidaten,
-            "Kein Helligkeitssensor",
-            "den Helligkeitssensor",
-            "--dunkel",
-            interaktiv,
-            "Gesucht wird ein Sensor mit Geräteklasse „illuminance“ oder Einheit lx – z. B. die "
-            "Helligkeit des Bewegungsmelders in der Küche (Homematic IP: sensor.…_illumination).",
-        )
+        if not kueche:
+            # Kein aktiver Sensor aus der Küche – vielleicht ist er nur deaktiviert.
+            deaktiviert = deaktivierte_helligkeitssensoren(ha.register())
+            if deaktiviert and interaktiv and len(deaktiviert) <= MAX_ANGEBOT:
+                gewaehlt = deaktivierte_anbieten(ha, deaktiviert, zustaende, "als Dunkel-Sensor", mehrere=False)
+                if gewaehlt:
+                    [dunkel] = gewaehlt
+            elif deaktiviert:
+                aktive = ", ".join(entity_id for entity_id, _ in kandidaten) or "keine"
+                raise Abbruch(
+                    hinweis_deaktiviert(deaktiviert, "--dunkel")
+                    + f"\n  Aktive Helligkeitssensoren: {aktive}.\n  {HELLIGKEIT_HINWEIS}"
+                )
+        if dunkel is None:
+            if len(kueche) == 1:
+                kandidaten = kueche
+            [dunkel] = auswaehlen(
+                kandidaten,
+                "Kein Helligkeitssensor",
+                "den Helligkeitssensor",
+                "--dunkel",
+                interaktiv,
+                HELLIGKEIT_HINWEIS,
+            )
     if dunkel is None:
         return None, schwelle
     zustand = zustaende[dunkel]
@@ -1512,9 +1577,14 @@ def dunkel_bestimmen(
         print(f"⚠ {dunkel} ist zurzeit nicht verfügbar – ohne Wert geht das Licht wie bisher immer an.")
     elif helligkeit(zustand) is None and str(zustand.get("state")) != "unknown":
         print(f"⚠ {dunkel} meldet gerade „{zustand.get('state')}“ statt einer Zahl – ist das ein Helligkeitssensor?")
+    elif not ist_lux_sensor(dunkel, zustand):
+        print(
+            f"⚠ {dunkel} meldet keine Lux, sondern eine eigene Skala (ältere Homematic-Melder: 0–255). "
+            "Die Schwelle --dunkel-unter gilt in dieser Skala."
+        )
     print(
         f"✓ Dunkel-Sensor: {dunkel} („{name_von(zustand)}“), aktuell {helligkeit_text(zustand)} – "
-        f"heller als {schwelle:g} lx bleibt das Licht aus"
+        f"heller als {mit_einheit(schwelle, zustand)} bleibt das Licht aus"
     )
     return dunkel, schwelle
 
