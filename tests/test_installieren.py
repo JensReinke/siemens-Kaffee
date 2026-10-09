@@ -22,6 +22,7 @@ from aiohttp.test_utils import TestClient
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.auth import auth_provider_from_config
 from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry, ConfigFlow
 from homeassistant.core import HomeAssistant
@@ -54,6 +55,7 @@ ALARMANLAGE = "alarm_control_panel.alarmanlage"
 KAFFEEMASCHINE = "switch.kaffeevollautomat_einschalter"
 GESCHIRRSPUELER = "switch.geschirrspuler_einschalter"
 HELLIGKEIT = "sensor.kueche_helligkeit"  # der Lux-Wert des Bewegungsmelders in der Küche
+KUECHE_SENSOR = "sensor.bewegungsmelder_kuche_beleuchtungsstarke"  # wie Homematic(IP) Local ihn anlegt
 BERLIN = ZoneInfo("Europe/Berlin")
 
 
@@ -1289,20 +1291,47 @@ def steckdose(hass: HomeAssistant) -> Iterator[Callable[..., Awaitable[None]]]:
         yield partial(steckdose_einrichten, hass)
 
 
-async def steckdose_einrichten(hass: HomeAssistant, deaktiviert: bool = False) -> None:
-    """Legt die Steckdose „LED Kaffee“ (switch.led_kaffee) an – auf Wunsch deaktiviert."""
+class Helligkeitssensor(SensorEntity):
+    """Die Beleuchtungsstärke eines Homematic-IP-Bewegungsmelders in der Küche."""
+
+    _attr_should_poll = False
+    _attr_device_class = SensorDeviceClass.ILLUMINANCE
+    _attr_native_unit_of_measurement = "lx"
+
+    def __init__(self, wert: float) -> None:
+        self._attr_name = "Bewegungsmelder Küche Beleuchtungsstärke"
+        self._attr_unique_id = "smi-kueche-illumination"
+        self._attr_native_value = wert
+
+
+async def steckdose_einrichten(
+    hass: HomeAssistant,
+    deaktiviert: bool = False,
+    helligkeit: float | None = None,
+    sensor_deaktiviert: bool = False,
+) -> None:
+    """Legt die Steckdose „LED Kaffee“ (switch.led_kaffee) an – auf Wunsch deaktiviert –
+    und mit ``helligkeit`` den Helligkeitssensor des Küchen-Bewegungsmelders (KUECHE_SENSOR),
+    der mit ``sensor_deaktiviert`` von Anfang an deaktiviert ist, wie Homematic(IP) Local es macht."""
+    plattformen = ["switch"] + (["sensor"] if helligkeit is not None else [])
 
     async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-        await hass.config_entries.async_forward_entry_setups(entry, ["switch"])
+        await hass.config_entries.async_forward_entry_setups(entry, plattformen)
         return True
 
     async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-        return await hass.config_entries.async_unload_platforms(entry, ["switch"])
+        return await hass.config_entries.async_unload_platforms(entry, plattformen)
 
     async def async_setup_switch(
         hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
     ) -> None:
         async_add_entities([Steckdose()])
+
+    async def async_setup_sensor(
+        hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    ) -> None:
+        assert helligkeit is not None
+        async_add_entities([Helligkeitssensor(helligkeit)])
 
     mock_integration(
         hass,
@@ -1310,6 +1339,7 @@ async def steckdose_einrichten(hass: HomeAssistant, deaktiviert: bool = False) -
     )
     mock_platform(hass, f"{HOMEMATIC}.config_flow", None)
     mock_platform(hass, f"{HOMEMATIC}.switch", MockPlatform(async_setup_entry=async_setup_switch))
+    mock_platform(hass, f"{HOMEMATIC}.sensor", MockPlatform(async_setup_entry=async_setup_sensor))
     eintrag = MockConfigEntry(domain=HOMEMATIC, title="RaspberryMatic")
     eintrag.add_to_hass(hass)
     if deaktiviert:
@@ -1320,6 +1350,16 @@ async def steckdose_einrichten(hass: HomeAssistant, deaktiviert: bool = False) -
             config_entry=eintrag,
             suggested_object_id="led_kaffee",
             disabled_by=er.RegistryEntryDisabler.USER,
+        )
+    if sensor_deaktiviert:
+        er.async_get(hass).async_get_or_create(
+            "sensor",
+            HOMEMATIC,
+            "smi-kueche-illumination",
+            config_entry=eintrag,
+            suggested_object_id="bewegungsmelder_kuche_beleuchtungsstarke",
+            original_name="Bewegungsmelder Küche Beleuchtungsstärke",
+            disabled_by=er.RegistryEntryDisabler.INTEGRATION,
         )
     assert await hass.config_entries.async_setup(eintrag.entry_id)
     await hass.async_block_till_done()
@@ -1597,6 +1637,110 @@ async def test_mehrere_dunkel_sensoren_im_terminal_waehlen(
 
 
 @pytest.mark.usefixtures("kaffeemaschine")
+async def test_deaktivierter_kuechen_sensor_wird_angeboten(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ist die Helligkeit des Küchen-Melders deaktiviert, bietet das Skript sie zum Aktivieren an."""
+    await steckdose(helligkeit=7, sensor_deaktiviert=True)
+    assert home_assistant.states.get(KUECHE_SENSOR) is None
+    helligkeit(home_assistant, "0.71", "sensor.flur_og_bwm_beleuchtungsstarke", "Flur OG BWM Beleuchtungsstärke")
+
+    # Ohne Terminal greift das Skript nicht blind zum Flur-Sensor, sondern nennt den deaktivierten.
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel"
+    )
+    assert code == 1
+    assert f"    {KUECHE_SENSOR}\n" in fehler
+    assert "--dunkel <entity_id> angegeben, aktiviert dieses Skript sie selbst" in fehler
+    assert "Aktive Helligkeitssensoren: sensor.flur_og_bwm_beleuchtungsstarke." in fehler
+    assert gespeicherte_automationen(home_assistant) == []
+
+    # Im Terminal, Enter: nichts aktivieren, dann bleibt der Flur-Sensor als einziger aktiver.
+    with (
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=[""]),
+    ):
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel"
+        )
+    assert code == 0, fehler
+    assert "aktivieren und als Dunkel-Sensor verwenden?" in ausgabe
+    assert f"1) {KUECHE_SENSOR}" in ausgabe
+    assert "✓ Dunkel-Sensor: sensor.flur_og_bwm_beleuchtungsstarke" in ausgabe
+
+    # Im Terminal, Nummer 1: Der Küchen-Sensor wird aktiviert und verwendet.
+    with (
+        sofort_neuladen(),
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=["1"]),
+    ):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--dunkel")
+    assert code == 0, fehler
+    assert f"✓ {KUECHE_SENSOR} aktiviert" in ausgabe
+    assert (
+        f"✓ Dunkel-Sensor: {KUECHE_SENSOR} („Bewegungsmelder Küche Beleuchtungsstärke“), aktuell 7 lx – "
+        "heller als 20 lx bleibt das Licht aus" in ausgabe
+    )
+    assert home_assistant.states.get(KUECHE_SENSOR).state == "7"
+    automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
+    assert automationen[installieren.LICHT_AUTOMATION_ID]["triggers"][2]["entity_id"] == KUECHE_SENSOR
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_angegebener_deaktivierter_dunkel_sensor_wird_aktiviert(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    await steckdose(helligkeit=3, sensor_deaktiviert=True)
+    with sofort_neuladen():
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token,
+            "--licht", LICHT, "--dunkel", KUECHE_SENSOR,
+        )
+    assert code == 0, fehler
+    assert f"{KUECHE_SENSOR} ist deaktiviert – wird aktiviert." in ausgabe
+    assert f"✓ Dunkel-Sensor: {KUECHE_SENSOR} („Bewegungsmelder Küche Beleuchtungsstärke“), aktuell 3 lx" in ausgabe
+    assert er.async_get(home_assistant).async_get(KUECHE_SENSOR).disabled_by is None
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_helligkeit_ohne_einheit_wird_nach_namen_gefunden(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ein älterer Homematic-Melder meldet seine Helligkeit (0–255) ohne Einheit – der Name zählt."""
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    home_assistant.states.async_set(
+        "sensor.bewegungsmelder_kuche_helligkeit", "120", {"friendly_name": "Bewegungsmelder Küche Helligkeit"}
+    )
+    home_assistant.states.async_set("sensor.kuche_temperatur", "21.5", {"friendly_name": "Küche Temperatur"})
+    with patch.object(sys.stdin, "isatty", return_value=True), keine_rueckfrage():
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token,
+            "--licht", LICHT, "--dunkel", "--dunkel-unter", "30",
+        )
+    assert code == 0, fehler
+    assert "⚠ sensor.bewegungsmelder_kuche_helligkeit meldet keine Lux, sondern eine eigene Skala" in ausgabe
+    assert (
+        "✓ Dunkel-Sensor: sensor.bewegungsmelder_kuche_helligkeit („Bewegungsmelder Küche Helligkeit“), "
+        "aktuell 120 – heller als 30 bleibt das Licht aus" in ausgabe
+    )
+    automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
+    assert automationen[installieren.LICHT_AUTOMATION_ID]["triggers"][2] == {
+        "trigger": "numeric_state", "entity_id": "sensor.bewegungsmelder_kuche_helligkeit", "above": 30, "id": "hell",
+    }
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
 async def test_kein_dunkel_sensor(
     home_assistant: HomeAssistant,
     client: TestClient,
@@ -1857,6 +2001,55 @@ def test_licht_uebernehmen_ist_nachsichtig() -> None:
     assert installieren.licht_uebernehmen(mit) == {"licht": LICHT}
     assert installieren.licht_uebernehmen({"actions": "kaputt"}) == {}
     assert installieren.licht_uebernehmen({}) == {}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sensor.bewegungsmelder_kuche_beleuchtungsstarke",
+        "Beleuchtungsstärke",
+        "sensor.hmip_smo_illumination",
+        "sensor.hue_motion_light_level",
+        "sensor.flur_brightness",
+        "Helligkeit Küche",
+        "sensor.garten_lux",
+    ],
+)
+def test_helligkeitswoerter(text: str) -> None:
+    assert installieren.HELLIGKEIT_WOERTER.search(text)
+
+
+@pytest.mark.parametrize("text", ["sensor.kuche_temperatur", "sensor.luxemburg_wetter", "switch.led_kaffee"])
+def test_keine_helligkeitswoerter(text: str) -> None:
+    assert not installieren.HELLIGKEIT_WOERTER.search(text)
+
+
+def test_deaktivierte_helligkeitssensoren_kueche_zuerst() -> None:
+    """Aus dem Register: nur deaktivierte Sensoren mit Helligkeits-Namen, Küche vor Flur, Nebenwerte zuletzt."""
+    from types import SimpleNamespace
+
+    def eintrag(entity_id: str, name: str = "", deaktiviert: bool = True) -> dict[str, Any]:
+        return {"entity_id": entity_id, "original_name": name, "disabled_by": "integration" if deaktiviert else None}
+
+    register = SimpleNamespace(
+        entitaeten={
+            e["entity_id"]: e
+            for e in (
+                eintrag("sensor.flur_og_bwm_beleuchtungsstarke", "Beleuchtungsstärke"),
+                eintrag("sensor.bewegungsmelder_kuche_average_illumination", "Average Illumination"),
+                eintrag("sensor.bewegungsmelder_kuche_beleuchtungsstarke", "Beleuchtungsstärke"),
+                eintrag("sensor.kuche_temperatur", "Temperatur"),
+                eintrag("switch.kuche_beleuchtung", "Beleuchtung"),
+                eintrag("sensor.terrasse_beleuchtungsstarke", "Beleuchtungsstärke", deaktiviert=False),
+            )
+        },
+        entitaetsname=installieren.Register.entitaetsname,
+    )
+    assert installieren.deaktivierte_helligkeitssensoren(register) == [
+        "sensor.bewegungsmelder_kuche_beleuchtungsstarke",
+        "sensor.bewegungsmelder_kuche_average_illumination",
+        "sensor.flur_og_bwm_beleuchtungsstarke",
+    ]
 
 
 @pytest.mark.parametrize(
