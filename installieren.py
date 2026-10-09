@@ -84,6 +84,8 @@ STANDARD_URL = "http://homeassistant.local:8123"
 STANDARD_VON = "05:00"
 STANDARD_BIS = "09:00"
 ZEITLIMIT = 30  # Sekunden pro Anfrage
+AUSSCHALT_SEKUNDEN = 30  # so lange wartet der Probelauf, bis die Maschine wieder aus ist
+PROBELAUF_SCHON_AN = "Die Kaffeemaschine ist schon an – zum Ausprobieren bitte erst ausschalten."
 STANDARD_UNSCHARF = "disarmed"  # Zustand „unscharf“ einer Alarmzentrale
 
 # Entitäten, die den Zustand der Alarmanlage melden können – eine Alarmzentrale
@@ -1313,7 +1315,7 @@ def installieren(
 def probelauf(ha: HomeAssistant, automation: str, kaffeemaschine: str) -> str:
     """Löst die Automation ohne Bedingungen aus und wartet, bis die Maschine an ist."""
     if ha.get_json(f"/api/states/{kaffeemaschine}")["state"] == "on":
-        return "Die Kaffeemaschine ist schon an – zum Ausprobieren bitte erst ausschalten."
+        return PROBELAUF_SCHON_AN
     ha.post_json(
         "/api/services/automation/trigger",
         {"entity_id": automation, "skip_condition": True},
@@ -1327,6 +1329,29 @@ def probelauf(ha: HomeAssistant, automation: str, kaffeemaschine: str) -> str:
         "noch nicht „an“. Ist die Maschine im Standby mit dem WLAN verbunden und "
         "die Fernsteuerung in Home Connect erlaubt?"
     )
+
+
+def wieder_ausschalten(ha: HomeAssistant, kaffeemaschine: str, sekunden: Optional[int] = None) -> str:
+    """Nach dem Probelauf: Die Maschine wieder ausschalten – sie war vorher aus."""
+    sekunden = AUSSCHALT_SEKUNDEN if sekunden is None else sekunden
+    status, _ = ha.anfrage("POST", "/api/services/switch/turn_off", json_daten={"entity_id": kaffeemaschine})
+    for _ in range(sekunden if status < 400 else 0):
+        if ha.get_json(f"/api/states/{kaffeemaschine}")["state"] == "off":
+            return "✓ Die Kaffeemaschine ist wieder aus – sie war vor dem Probelauf aus."
+        time.sleep(1)
+    return (
+        f"⚠ {kaffeemaschine} ließ sich nicht wieder ausschalten – bitte von Hand ausschalten. "
+        "Home Connect lehnt das Ausschalten manchmal ab, solange die Maschine noch hochfährt."
+    )
+
+
+def licht_aus_pruefen(ha: HomeAssistant, licht: str, sekunden: int = 10) -> str:
+    """Nach dem Ausschalten: Ist das Licht an der Maschine wieder ausgegangen?"""
+    for _ in range(sekunden):
+        if ha.get_json(f"/api/states/{licht}")["state"] == "off":
+            return "✓ Das Licht an der Maschine ist wieder aus."
+        time.sleep(1)
+    return f"⚠ {licht} ist nicht wieder ausgegangen – bitte die Licht-Automation in Home Assistant prüfen."
 
 
 def hell_hinweis(ha: HomeAssistant, dunkel: str, dunkel_unter: "int | float") -> Optional[str]:
@@ -1460,7 +1485,15 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--probelauf",
         action="store_true",
-        help="Nach dem Einrichten die Automation sofort auslösen – die Kaffeemaschine geht dann wirklich an",
+        help=(
+            "Nach dem Einrichten die Automation sofort auslösen – die Kaffeemaschine geht dann wirklich "
+            "an und danach wieder aus"
+        ),
+    )
+    parser.add_argument(
+        "--anlassen",
+        action="store_true",
+        help="Nach dem Probelauf die Kaffeemaschine anlassen (sonst wird sie wieder ausgeschaltet)",
     )
     return parser.parse_args(argv)
 
@@ -1756,9 +1789,18 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
     if args.probelauf:
         print("Probelauf: Automation wird ausgelöst …")
         hell = hell_hinweis(ha, dunkel, dunkel_unter) if dunkel else None
-        print(f"✓ {probelauf(ha, automation['entity_id'], kaffeemaschine)}")
+        ergebnis = probelauf(ha, automation["entity_id"], kaffeemaschine)
+        print(f"✓ {ergebnis}")
+        licht_war_an = False
         if licht:
-            print(licht_pruefen(ha, licht, hell))
+            meldung = licht_pruefen(ha, licht, hell)
+            print(meldung)
+            licht_war_an = meldung.startswith("✓")
+        # Die Maschine war vor dem Probelauf aus – so soll sie auch bleiben.
+        if ergebnis != PROBELAUF_SCHON_AN and not args.anlassen:
+            print(wieder_ausschalten(ha, kaffeemaschine))
+            if licht_war_an:
+                print(licht_aus_pruefen(ha, licht))
 
     print(
         "\nFertig. Wird die Alarmanlage im Zeitfenster unscharf geschaltet, geht die "

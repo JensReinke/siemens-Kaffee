@@ -474,6 +474,46 @@ async def test_probelauf_schaltet_die_kaffeemaschine_ein(
     )
     assert code == 0, fehler
     assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
+    # … und danach wieder aus, denn vor dem Probelauf war sie aus.
+    assert "✓ Die Kaffeemaschine ist wieder aus – sie war vor dem Probelauf aus." in ausgabe
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"
+
+    # Mit --anlassen bleibt sie an.
+    code, ausgabe, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--probelauf", "--anlassen"
+    )
+    assert code == 0, fehler
+    assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
+    assert "wieder aus" not in ausgabe
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
+
+    # Läuft sie schon, gibt es nichts auszuprobieren – und nichts auszuschalten.
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--probelauf")
+    assert code == 0, fehler
+    assert "schon an – zum Ausprobieren bitte erst ausschalten" in ausgabe
+    assert "wieder aus" not in ausgabe
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_probelauf_wenn_sich_die_maschine_nicht_ausschalten_laesst(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Nimmt die Maschine das Ausschalten nicht an, sagt das Skript Bescheid, statt abzubrechen."""
+
+    async def ignorieren(self: HomeConnectSchalter, **kwargs: Any) -> None:
+        pass
+
+    with patch.object(HomeConnectSchalter, "async_turn_off", ignorieren), patch("installieren.AUSSCHALT_SEKUNDEN", 1):
+        code, ausgabe, fehler = await skript(
+            home_assistant, client, capsys, "--token", hass_access_token, "--probelauf"
+        )
+    assert code == 0, fehler
+    assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
+    assert f"⚠ {KAFFEEMASCHINE} ließ sich nicht wieder ausschalten – bitte von Hand ausschalten." in ausgabe
     assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
 
 
@@ -880,7 +920,7 @@ async def test_angegebener_deaktivierter_einschalter_wird_aktiviert(
     assert code == 0, fehler
     assert f"{KAFFEEMASCHINE} ist deaktiviert – wird aktiviert." in ausgabe
     assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
-    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"  # nach dem Probelauf wieder aus
 
 
 @pytest.mark.usefixtures("kaffeemaschine")
@@ -1387,8 +1427,11 @@ async def test_licht_folgt_der_kaffeemaschine(
     assert f"✓ Automation angelegt: „{installieren.LICHT_ALIAS}“" in ausgabe
     assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
     assert "✓ Das Licht an der Maschine ist angegangen." in ausgabe
+    assert "✓ Die Kaffeemaschine ist wieder aus – sie war vor dem Probelauf aus." in ausgabe
+    assert "✓ Das Licht an der Maschine ist wieder aus." in ausgabe
     assert "Das Licht an der Maschine geht mit ihr an und aus." in ausgabe
-    assert home_assistant.states.get(LICHT).state == "on"
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"
+    assert home_assistant.states.get(LICHT).state == "off"
 
     automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
     assert set(automationen) == {installieren.AUTOMATION_ID, installieren.LICHT_AUTOMATION_ID}
@@ -1450,6 +1493,8 @@ async def test_nicht_erreichbare_steckdose_wird_trotzdem_eingetragen(
     assert f"⚠ {LICHT} ist zurzeit nicht verfügbar" in ausgabe
     assert "✓ Die Kaffeemaschine ist angegangen." in ausgabe
     assert f"⚠ {LICHT} ist nicht mit angegangen" in ausgabe
+    assert "✓ Die Kaffeemaschine ist wieder aus" in ausgabe
+    assert "wieder ausgegangen" not in ausgabe  # das Licht war nie an, also gibt es da nichts zu prüfen
     assert len(gespeicherte_automationen(home_assistant)) == 2
 
 
@@ -1902,7 +1947,8 @@ async def test_probelauf_bei_helligkeit(
         in ausgabe
     )
     assert "⚠" not in ausgabe
-    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
+    assert "✓ Die Kaffeemaschine ist wieder aus" in ausgabe
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"
     assert home_assistant.states.get(LICHT).state == "off"
 
 
