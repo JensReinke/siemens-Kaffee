@@ -19,6 +19,9 @@ Skript sie auf Wunsch selbst.
 Mit --licht <entity_id> legt es zusätzlich eine zweite Automation an: Ein Licht
 oder eine Steckdose an der Maschine geht mit der Kaffeemaschine an und aus –
 egal ob die Automation, Home Assistant oder jemand am Gerät sie einschaltet.
+Mit --dunkel geht das Licht nur an, wenn ein Helligkeitssensor – z. B. der des
+Bewegungsmelders in der Küche – Dunkelheit meldet (Standard: höchstens 20 Lux),
+und aus, sobald es hell wird.
 
 Aufruf im Heimnetz, z. B. auf einem Mac oder PC:
 
@@ -47,7 +50,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 AUTOMATION_ID = "siemens_kaffee_bei_unscharf"
 ALIAS = "Kaffeemaschine an, wenn die Alarmanlage morgens unscharf geschaltet wird"
@@ -55,6 +58,16 @@ ALIAS = "Kaffeemaschine an, wenn die Alarmanlage morgens unscharf geschaltet wir
 LICHT_AUTOMATION_ID = "siemens_kaffee_licht"
 LICHT_ALIAS = "Licht an der Kaffeemaschine folgt der Kaffeemaschine"
 LICHT_DOMAINS = ("light", "switch")
+# Mit --dunkel geht das Licht nur, wenn ein Helligkeitssensor (z. B. der des
+# Bewegungsmelders in der Küche) höchstens STANDARD_DUNKEL_UNTER Lux meldet.
+STANDARD_DUNKEL_UNTER = 20
+DUNKEL_DOMAINS = ("sensor",)
+DUNKEL_AUTO = "auto"  # --dunkel ohne Wert: Sensor suchen
+DUNKEL_AUS = "aus"  # --dunkel aus: Bedingung wieder entfernen
+LUX_EINHEITEN = ("lx", "lux")
+KUECHE = re.compile(r"k(?:ü|ue|u)che|kitchen", re.IGNORECASE)  # „kuche“: so schreibt HA Küche in IDs
+# Homematic-Bewegungsmelder liefern neben der Helligkeit auch Mittel-/Minimal-/Maximalwerte.
+NEBENWERTE = re.compile(r"average|lowest|highest|current|mittel|minim|maxim", re.IGNORECASE)
 HOME_CONNECT_ANLEITUNG = "https://github.com/JensReinke/siemens-Kaffee#home-connect-einrichten"
 STANDARD_URL = "http://homeassistant.local:8123"
 STANDARD_VON = "05:00"
@@ -165,27 +178,69 @@ def automation_config(
     }
 
 
-def licht_config(kaffeemaschine: str, licht: str) -> dict[str, Any]:
-    """Dieselbe Automation wie beispiele/licht_folgt_kaffeemaschine.yaml.
+def licht_config(
+    kaffeemaschine: str,
+    licht: str,
+    dunkel: Optional[str] = None,
+    dunkel_unter: "int | float" = STANDARD_DUNKEL_UNTER,
+) -> dict[str, Any]:
+    """Dieselbe Automation wie beispiele/licht_folgt_kaffeemaschine.yaml – mit
+    ``dunkel`` wie beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml.
 
     Das Licht (oder die Steckdose) an der Maschine geht mit dem Einschalter der
     Kaffeemaschine an und aus – auch wenn jemand die Maschine am Gerät oder in
     Home Assistant schaltet. ``homeassistant.turn_on`` schaltet Lichter und
     Schalter gleichermaßen.
+
+    Mit ``dunkel`` (ein Helligkeitssensor) geht das Licht nur an, wenn der Sensor
+    höchstens ``dunkel_unter`` Lux meldet, und aus, sobald es heller wird. Ohne
+    brauchbaren Wert (unknown, unavailable, keine Zahl, Sensor gelöscht) gilt es
+    als dunkel: ``numeric_state`` ist dann falsch oder löst einen Fehler aus, und
+    ``choose`` übergeht die Option – übrig bleibt „Maschine an → Licht an“.
     """
+    an = {"action": "homeassistant.turn_on", "target": {"entity_id": licht}}
+    aus = {"action": "homeassistant.turn_off", "target": {"entity_id": licht}}
+    if dunkel is None:
+        return {
+            "alias": LICHT_ALIAS,
+            "description": "Schaltet das Licht an der Kaffeemaschine zusammen mit der Maschine ein und aus.",
+            "mode": "restart",
+            "triggers": [
+                {"trigger": "state", "entity_id": kaffeemaschine, "to": "on", "id": "an"},
+                {"trigger": "state", "entity_id": kaffeemaschine, "to": "off", "id": "aus"},
+            ],
+            "actions": [{"if": [{"condition": "trigger", "id": "an"}], "then": [an], "else": [aus]}],
+        }
+    maschine_an = {"condition": "state", "entity_id": kaffeemaschine, "state": "on"}
     return {
         "alias": LICHT_ALIAS,
-        "description": "Schaltet das Licht an der Kaffeemaschine zusammen mit der Maschine ein und aus.",
+        "description": (
+            "Schaltet das Licht an der Kaffeemaschine mit der Maschine aus – und ein, wenn es dabei "
+            f"dunkel ist ({dunkel} höchstens {dunkel_unter:g} lx)."
+        ),
         "mode": "restart",
         "triggers": [
             {"trigger": "state", "entity_id": kaffeemaschine, "to": "on", "id": "an"},
             {"trigger": "state", "entity_id": kaffeemaschine, "to": "off", "id": "aus"},
+            {"trigger": "numeric_state", "entity_id": dunkel, "above": dunkel_unter, "id": "hell"},
+            {"trigger": "numeric_state", "entity_id": dunkel, "below": dunkel_unter, "id": "dunkel"},
         ],
         "actions": [
             {
-                "if": [{"condition": "trigger", "id": "an"}],
-                "then": [{"action": "homeassistant.turn_on", "target": {"entity_id": licht}}],
-                "else": [{"action": "homeassistant.turn_off", "target": {"entity_id": licht}}],
+                "choose": [
+                    # Maschine aus oder hell geworden: Licht aus.
+                    {"conditions": [{"condition": "trigger", "id": ["aus", "hell"]}], "sequence": [aus]},
+                    # Maschine an, aber zu hell: Licht bleibt aus (steht so in der Ablaufverfolgung).
+                    {
+                        "conditions": [
+                            maschine_an,
+                            {"condition": "numeric_state", "entity_id": dunkel, "above": dunkel_unter},
+                        ],
+                        "sequence": [{"stop": "Es ist hell – das Licht bleibt aus."}],
+                    },
+                    # Maschine an und dunkel (oder kein Messwert): Licht an.
+                    {"conditions": [maschine_an], "sequence": [an]},
+                ]
             }
         ],
     }
@@ -200,6 +255,20 @@ def uhrzeit(text: str) -> str:
     if stunde > 23 or minute > 59 or sekunde > 59:
         raise argparse.ArgumentTypeError(f"„{text}“ ist keine gültige Uhrzeit")
     return f"{stunde:02d}:{minute:02d}:{sekunde:02d}"
+
+
+def lux(text: str) -> "int | float":
+    """„20“, „20,5“ oder „20 lx“ → 20 bzw. 20.5 – die Schwelle für --dunkel-unter."""
+    roh = text.strip().lower()
+    for einheit in LUX_EINHEITEN:
+        roh = roh.removesuffix(einheit).strip()
+    try:
+        wert = float(roh.replace(",", "."))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"„{text}“ ist kein Helligkeitswert in Lux wie 20") from None
+    if not (0 <= wert < float("inf")):  # auch NaN fällt hier durch
+        raise argparse.ArgumentTypeError(f"„{text}“ ist kein Helligkeitswert in Lux wie 20")
+    return int(wert) if wert.is_integer() else wert
 
 
 def url_bereinigen(url: str) -> str:
@@ -561,6 +630,56 @@ def kandidaten_alarmanlage(zustaende: dict[str, dict[str, Any]]) -> list[tuple[s
         (entity_id, f"„{name_von(zustand)}“, Zustand: {zustand['state']}")
         for entity_id, zustand in treffer
         if alarm_treffer(entity_id, name_von(zustand))
+    ]
+
+
+def ist_helligkeitssensor(entity_id: str, zustand: dict[str, Any]) -> bool:
+    """Ein Sensor mit Geräteklasse „illuminance“ oder Einheit Lux."""
+    attribute = zustand.get("attributes", {})
+    return entity_id.startswith("sensor.") and (
+        attribute.get("device_class") == "illuminance"
+        or str(attribute.get("unit_of_measurement", "")).lower() in LUX_EINHEITEN
+    )
+
+
+def helligkeit(zustand: dict[str, Any]) -> Optional[float]:
+    """Der Messwert als Zahl – oder None, wenn der Sensor gerade keinen liefert."""
+    try:
+        wert = float(zustand["state"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return wert if wert == wert else None  # NaN
+
+
+def helligkeit_text(zustand: dict[str, Any]) -> str:
+    wert = helligkeit(zustand)
+    if wert is None:
+        return "zurzeit kein Wert"
+    einheit = zustand.get("attributes", {}).get("unit_of_measurement") or "lx"
+    return f"{wert:g} {einheit}"
+
+
+def ist_kueche(entity_id: str, name: str = "") -> bool:
+    return bool(KUECHE.search(f"{entity_id} {name}"))
+
+
+def kandidaten_helligkeit(zustaende: dict[str, dict[str, Any]]) -> list[tuple[str, str]]:
+    """Helligkeitssensoren für --dunkel: die aus der Küche zuerst, Nebenwerte zuletzt."""
+    treffer = [
+        (entity_id, zustand)
+        for entity_id, zustand in zustaende.items()
+        if ist_helligkeitssensor(entity_id, zustand)
+    ]
+    treffer.sort(
+        key=lambda paar: (
+            not ist_kueche(paar[0], name_von(paar[1])),
+            bool(NEBENWERTE.search(f"{paar[0]} {name_von(paar[1])}")),
+            paar[0],
+        )
+    )
+    return [
+        (entity_id, f"„{name_von(zustand)}“, aktuell {helligkeit_text(zustand)}")
+        for entity_id, zustand in treffer
     ]
 
 
@@ -1044,9 +1163,11 @@ def automation_entitaet(
     return None
 
 
-def vorhandene_automation(ha: HomeAssistant) -> Optional[dict[str, Any]]:
-    """Die gespeicherte Konfiguration unserer Automation – oder None, wenn es sie noch nicht gibt."""
-    status, text = ha.anfrage("GET", f"/api/config/automation/config/{AUTOMATION_ID}")
+def vorhandene_automation(
+    ha: HomeAssistant, automation_id: str = AUTOMATION_ID
+) -> Optional[dict[str, Any]]:
+    """Die gespeicherte Konfiguration einer unserer Automationen – oder None, wenn es sie noch nicht gibt."""
+    status, text = ha.anfrage("GET", f"/api/config/automation/config/{automation_id}")
     if status != 200:
         return None
     try:
@@ -1082,6 +1203,33 @@ def uebernehmen(config: dict[str, Any]) -> dict[str, Any]:
                     werte["von"], werte["bis"] = uhrzeit(bedingung["after"]), uhrzeit(bedingung["before"])
                 except argparse.ArgumentTypeError:
                     pass  # z. B. ein Template statt einer Uhrzeit – dann gilt der Standard
+    return werte
+
+
+def _alle_dicts(objekt: Any) -> Iterator[dict[str, Any]]:
+    """Alle Dictionaries einer verschachtelten Struktur, in Lesereihenfolge."""
+    if isinstance(objekt, dict):
+        yield objekt
+        for wert in objekt.values():
+            yield from _alle_dicts(wert)
+    elif isinstance(objekt, list):
+        for eintrag in objekt:
+            yield from _alle_dicts(eintrag)
+
+
+def licht_uebernehmen(config: dict[str, Any]) -> dict[str, Any]:
+    """Liest Licht, Dunkel-Sensor und Schwelle aus der gespeicherten Licht-Automation –
+    nachsichtig, falls sie in Home Assistant bearbeitet wurde."""
+    werte: dict[str, Any] = {}
+    for eintrag in _alle_dicts(config.get("actions")):
+        if "licht" not in werte and eintrag.get("action") == "homeassistant.turn_on":
+            ziel = eintrag.get("target")
+            if isinstance(ziel, dict) and isinstance(ziel.get("entity_id"), str):
+                werte["licht"] = ziel["entity_id"]
+        if "dunkel" not in werte and eintrag.get("condition") == "numeric_state":
+            sensor, schwelle = eintrag.get("entity_id"), eintrag.get("above")
+            if isinstance(sensor, str) and isinstance(schwelle, (int, float)) and not isinstance(schwelle, bool):
+                werte["dunkel"], werte["dunkel_unter"] = sensor, schwelle
     return werte
 
 
@@ -1129,8 +1277,24 @@ def probelauf(ha: HomeAssistant, automation: str, kaffeemaschine: str) -> str:
     )
 
 
-def licht_pruefen(ha: HomeAssistant, licht: str, sekunden: int = 10) -> str:
-    """Nach dem Probelauf: Ist das Licht an der Maschine mit angegangen?"""
+def hell_hinweis(ha: HomeAssistant, dunkel: str, dunkel_unter: "int | float") -> Optional[str]:
+    """Vor dem Probelauf: Ist es gerade so hell, dass das Licht aus bleiben soll?"""
+    zustand = ha.get_json(f"/api/states/{dunkel}")
+    wert = helligkeit(zustand)
+    if wert is None or wert <= dunkel_unter:
+        return None
+    return (
+        f"ℹ Es ist hell ({dunkel}: {helligkeit_text(zustand)}, Licht nur bis {dunkel_unter:g} lx) – "
+        "das Licht bleibt aus, so soll es sein."
+    )
+
+
+def licht_pruefen(
+    ha: HomeAssistant, licht: str, hell: Optional[str] = None, sekunden: int = 10
+) -> str:
+    """Nach dem Probelauf: Ist das Licht an der Maschine mit angegangen? Bei Helligkeit soll es aus bleiben."""
+    if hell:
+        return hell
     for _ in range(sekunden):
         zustand = ha.get_json(f"/api/states/{licht}")["state"]
         if zustand == "on":
@@ -1200,6 +1364,25 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dunkel",
+        nargs="?",
+        const=DUNKEL_AUTO,
+        metavar="ENTITY_ID",
+        help=(
+            "Licht nur, wenn es dunkel ist: Helligkeitssensor (sensor.…, Lux), z. B. der des "
+            "Bewegungsmelders in der Küche; ohne Angabe wird er gesucht. „aus“ entfernt die Bedingung wieder"
+        ),
+    )
+    parser.add_argument(
+        "--dunkel-unter",
+        type=lux,
+        metavar="LUX",
+        help=(
+            f"Bis zu welcher Helligkeit es „dunkel“ ist (Standard {STANDARD_DUNKEL_UNTER} lx; bei einer "
+            "vorhandenen Licht-Automation deren Wert)"
+        ),
+    )
+    parser.add_argument(
         "--von",
         type=uhrzeit,
         help=f"Anfang des Zeitfensters (Standard {STANDARD_VON}; bei einer vorhandenen Automation deren Wert)",
@@ -1264,6 +1447,76 @@ def main(argv: Optional[list[str]] = None) -> int:
     except KeyboardInterrupt:
         print("\nAbgebrochen.", file=sys.stderr)
         return 130
+
+
+def dunkel_bestimmen(
+    ha: HomeAssistant,
+    args: argparse.Namespace,
+    zustaende: dict[str, dict[str, Any]],
+    vorhanden: dict[str, Any],
+    interaktiv: bool,
+) -> tuple[Optional[str], "int | float"]:
+    """Welcher Helligkeitssensor als Dunkel-Sensor dient und bis wohin es dunkel ist.
+
+    Vorrang: Option > gespeicherte Licht-Automation > Standard. ``--dunkel aus``
+    entfernt den Sensor, ``--dunkel`` ohne Wert sucht ihn, ``--dunkel-unter``
+    allein löst die Suche ebenfalls aus.
+    """
+    schwelle = (
+        args.dunkel_unter
+        if args.dunkel_unter is not None
+        else vorhanden.get("dunkel_unter", STANDARD_DUNKEL_UNTER)
+    )
+    if args.dunkel == DUNKEL_AUS:
+        if args.dunkel_unter is not None:
+            raise Abbruch("--dunkel aus und --dunkel-unter passen nicht zusammen.")
+        return None, schwelle
+    suchen = args.dunkel == DUNKEL_AUTO
+    dunkel: Optional[str] = None
+    if args.dunkel and not suchen:
+        if re.fullmatch(r"[\d.,]+", args.dunkel):
+            raise Abbruch(
+                f"Die Schwelle gehört zu --dunkel-unter: --dunkel-unter {args.dunkel} – "
+                "--dunkel erwartet den Helligkeitssensor (sensor.…)."
+            )
+        dunkel = entitaet_bereitstellen(ha, args.dunkel, zustaende, DUNKEL_DOMAINS, "--dunkel")
+        if not ist_helligkeitssensor(dunkel, zustaende[dunkel]):
+            print(f"⚠ {dunkel} hat weder Geräteklasse „illuminance“ noch Einheit lx – ist das ein Helligkeitssensor?")
+    elif not suchen:
+        gespeichert = vorhanden.get("dunkel")
+        if gespeichert in zustaende:
+            dunkel = gespeichert
+        elif gespeichert:
+            print(f"⚠ Den gespeicherten Dunkel-Sensor {gespeichert} gibt es nicht mehr – ich suche neu.")
+            suchen = True
+        elif args.dunkel_unter is not None:
+            suchen = True
+    if suchen:
+        kandidaten = kandidaten_helligkeit(zustaende)
+        kueche = [k for k in kandidaten if ist_kueche(k[0], name_von(zustaende[k[0]]))]
+        if len(kueche) == 1:
+            kandidaten = kueche
+        [dunkel] = auswaehlen(
+            kandidaten,
+            "Kein Helligkeitssensor",
+            "den Helligkeitssensor",
+            "--dunkel",
+            interaktiv,
+            "Gesucht wird ein Sensor mit Geräteklasse „illuminance“ oder Einheit lx – z. B. die "
+            "Helligkeit des Bewegungsmelders in der Küche (Homematic IP: sensor.…_illumination).",
+        )
+    if dunkel is None:
+        return None, schwelle
+    zustand = zustaende[dunkel]
+    if not verfuegbar(dunkel, zustaende):
+        print(f"⚠ {dunkel} ist zurzeit nicht verfügbar – ohne Wert geht das Licht wie bisher immer an.")
+    elif helligkeit(zustand) is None and str(zustand.get("state")) != "unknown":
+        print(f"⚠ {dunkel} meldet gerade „{zustand.get('state')}“ statt einer Zahl – ist das ein Helligkeitssensor?")
+    print(
+        f"✓ Dunkel-Sensor: {dunkel} („{name_von(zustand)}“), aktuell {helligkeit_text(zustand)} – "
+        f"heller als {schwelle:g} lx bleibt das Licht aus"
+    )
+    return dunkel, schwelle
 
 
 def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -> int:
@@ -1363,9 +1616,28 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
             "wird trotzdem angelegt."
         )
 
+    # Auch die Licht-Automation gibt ihre Einstellungen vor, damit z. B.
+    # „--dunkel“ allein reicht, um das Licht an die Helligkeit zu koppeln.
+    vorhandenes_licht = licht_uebernehmen(vorhandene_automation(ha, LICHT_AUTOMATION_ID) or {})
+    if vorhandenes_licht:
+        print(
+            "✓ Die Licht-Automation gibt es schon – Licht, Dunkel-Sensor und Schwelle werden "
+            "übernommen, soweit nichts anderes angegeben ist."
+        )
     licht = None
     if args.licht:
         licht = entitaet_bereitstellen(ha, args.licht, zustaende, LICHT_DOMAINS, "--licht")
+    elif vorhandenes_licht.get("licht") in zustaende:
+        licht = vorhandenes_licht["licht"]
+    elif vorhandenes_licht.get("licht"):
+        print(
+            f"⚠ Das gespeicherte Licht {vorhandenes_licht['licht']} gibt es nicht mehr – die "
+            "Licht-Automation bleibt unverändert. Neu angeben mit --licht <entity_id>."
+        )
+    if licht is None and (args.dunkel or args.dunkel_unter is not None):
+        raise Abbruch("--dunkel braucht ein Licht an der Maschine: bitte --licht <entity_id> mit angeben.")
+    dunkel, dunkel_unter = None, STANDARD_DUNKEL_UNTER
+    if licht:
         if licht == kaffeemaschine:
             raise Abbruch(f"--licht {licht} ist der Einschalter der Kaffeemaschine selbst.")
         print(f"✓ Licht an der Maschine: {licht} („{name_von(zustaende[licht])}“)")
@@ -1374,11 +1646,12 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
                 f"⚠ {licht} ist zurzeit nicht verfügbar – ist die Steckdose bzw. das Licht eingesteckt "
                 "und in der Zentrale erreichbar? Die Automation wird trotzdem angelegt."
             )
+        dunkel, dunkel_unter = dunkel_bestimmen(ha, args, zustaende, vorhandenes_licht, interaktiv)
 
     von = args.von or vorhanden.get("von") or uhrzeit(STANDARD_VON)
     bis = args.bis or vorhanden.get("bis") or uhrzeit(STANDARD_BIS)
     config = automation_config(alarmanlagen, kaffeemaschine, von, bis, unscharf)
-    licht_konfig = licht_config(kaffeemaschine, licht) if licht else None
+    licht_konfig = licht_config(kaffeemaschine, licht, dunkel, dunkel_unter) if licht else None
     if args.nur_anzeigen:
         print("\nDiese Automation würde eingerichtet (nichts geändert):")
         print(json.dumps(config, indent=2, ensure_ascii=False))
@@ -1412,14 +1685,23 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
 
     if args.probelauf:
         print("Probelauf: Automation wird ausgelöst …")
+        hell = hell_hinweis(ha, dunkel, dunkel_unter) if dunkel else None
         print(f"✓ {probelauf(ha, automation['entity_id'], kaffeemaschine)}")
         if licht:
-            print(licht_pruefen(ha, licht))
+            print(licht_pruefen(ha, licht, hell))
 
     print(
         "\nFertig. Wird die Alarmanlage im Zeitfenster unscharf geschaltet, geht die "
         "Kaffeemaschine an."
-        + (" Das Licht an der Maschine geht mit ihr an und aus." if licht else "")
+        + (
+            (
+                " Das Licht an der Maschine geht mit ihr aus – und an, wenn es dunkel ist."
+                if dunkel
+                else " Das Licht an der Maschine geht mit ihr an und aus."
+            )
+            if licht
+            else ""
+        )
         + "\nZum Ändern: Einstellungen → Automationen & Szenen → „"
         + ALIAS
         + ("“ bzw. „" + LICHT_ALIAS if licht else "")
