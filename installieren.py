@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import getpass
 import hashlib
 import json
@@ -58,6 +59,14 @@ ALIAS = "Kaffeemaschine an, wenn die Alarmanlage morgens unscharf geschaltet wir
 LICHT_AUTOMATION_ID = "siemens_kaffee_licht"
 LICHT_ALIAS = "Licht an der Kaffeemaschine folgt der Kaffeemaschine"
 LICHT_DOMAINS = ("light", "switch")
+LICHT_AUTO = "auto"  # --licht ohne Wert: Licht suchen, neu angelegte Geräte zuerst
+LICHT_WOERTER = re.compile(
+    r"led|licht|light|lampe|leuchte|zwischenschalter|steckdose|plug|strip", re.IGNORECASE
+)
+LICHT_HINWEIS = (
+    "Gesucht wird ein Licht oder Schalter mit „Kaffee“ im Namen, der nicht zur Kaffeemaschine "
+    "selbst gehört; neu angelegte Geräte stehen oben. Sonst eines mit LED, Licht oder Steckdose im Namen."
+)
 # Mit --dunkel geht das Licht nur, wenn ein Helligkeitssensor (z. B. der des
 # Bewegungsmelders in der Küche) höchstens STANDARD_DUNKEL_UNTER Lux meldet.
 STANDARD_DUNKEL_UNTER = 20
@@ -516,6 +525,78 @@ def kandidaten_kaffeemaschine(
     if echte_einschalter:
         kandidaten = echte_einschalter
     return kandidaten, sorted(deaktiviert), diagnose(register, zustaende)
+
+
+def licht_beschreibung(
+    zustand: dict[str, Any], entitaet: Optional[dict[str, Any]], geraet: Optional[dict[str, Any]]
+) -> str:
+    """„Zwischenschalter Kaffee“, eQ-3 HmIP-FSM, aus, angelegt 14.11.2026"""
+    teile = [f"„{name_von(zustand)}“"]
+    if geraet:
+        hersteller_modell = " ".join(str(w) for w in (geraet.get("manufacturer"), geraet.get("model")) if w)
+        if hersteller_modell:
+            teile.append(hersteller_modell)
+    state = str(zustand.get("state"))
+    teile.append({"on": "an", "off": "aus", "unavailable": "nicht verfügbar"}.get(state, state))
+    if entitaet and entitaet.get("created_at"):
+        angelegt = datetime.datetime.fromtimestamp(float(entitaet["created_at"]))
+        teile.append(f"angelegt {angelegt:%d.%m.%Y}")
+    return ", ".join(teile)
+
+
+def kandidaten_licht(
+    register: "Register", zustaende: dict[str, dict[str, Any]], kaffeemaschine: str = ""
+) -> list[tuple[str, str]]:
+    """Mögliche Lichter an der Maschine für --licht ohne Wert.
+
+    Lichter und Schalter, die nicht zur Kaffeemaschine (Home Connect) und nicht
+    zu einer Zentrale gehören. Zuerst alles mit Kaffee-Bezug, sonst alles, was
+    nach Licht klingt, sonst alle – verfügbare zuerst, neu angelegte oben.
+    """
+    treffer = []
+    for entity_id, zustand in zustaende.items():
+        if entity_id.split(".", 1)[0] not in LICHT_DOMAINS or entity_id == kaffeemaschine:
+            continue
+        entitaet = register.entitaeten.get(entity_id)
+        geraet = register.geraete.get((entitaet or {}).get("device_id") or "")
+        if geraet and (register.ist_home_connect(geraet) or register.ist_gross(geraet)):
+            continue
+        text = f"{entity_id} {name_von(zustand)}"
+        stufe = 0 if KAFFEEMASCHINE.search(text) else 1 if LICHT_WOERTER.search(text) else 2
+        treffer.append((stufe, entity_id, zustand, entitaet, geraet))
+    if not treffer:
+        return []
+    beste = min(stufe for stufe, *_ in treffer)
+    auswahl = sorted(
+        (t for t in treffer if t[0] == beste),
+        key=lambda t: (
+            not verfuegbar(t[1], zustaende),
+            -float((t[3] or {}).get("created_at") or 0),
+            t[1],
+        ),
+    )
+    return [(entity_id, licht_beschreibung(zustand, entitaet, geraet)) for _, entity_id, zustand, entitaet, geraet in auswahl]
+
+
+def licht_suchen(
+    register: "Register",
+    zustaende: dict[str, dict[str, Any]],
+    kaffeemaschine: str,
+    interaktiv: bool,
+    hinweis: str = LICHT_HINWEIS,
+) -> str:
+    """Sucht das Licht an der Maschine – automatisch, per Rückfrage oder mit klarer Meldung."""
+    kandidaten = kandidaten_licht(register, zustaende, kaffeemaschine)
+    if len(kandidaten) > MAX_ANGEBOT:
+        raise Abbruch(
+            f"{len(kandidaten)} Lichter und Schalter kämen infrage – bitte mit --licht <entity_id> angeben, "
+            "welches an der Kaffeemaschine hängt. Tipp: Dem Gerät in der Zentrale „Kaffee“ in den Namen "
+            "schreiben, dann findet das Skript es von selbst."
+        )
+    [licht] = auswaehlen(
+        kandidaten, "Kein Licht an der Maschine", "das Licht an der Maschine", "--licht", interaktiv, hinweis
+    )
+    return licht
 
 
 def verfuegbar(entity_id: str, zustaende: dict[str, dict[str, Any]]) -> bool:
@@ -1434,10 +1515,13 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--kaffeemaschine", help="Entitäts-ID des Einschalters der Kaffeemaschine")
     parser.add_argument(
         "--licht",
+        nargs="?",
+        const=LICHT_AUTO,
         metavar="ENTITY_ID",
         help=(
             "Licht oder Steckdose an der Kaffeemaschine (light.… oder switch.…): geht in einer "
-            "zweiten Automation mit der Maschine an und aus. Eine deaktivierte Entität wird aktiviert"
+            "zweiten Automation mit der Maschine an und aus; ohne Wert wird es gesucht, neu angelegte "
+            "Geräte zuerst. Eine deaktivierte Entität wird aktiviert"
         ),
     )
     parser.add_argument(
@@ -1728,15 +1812,37 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
             "übernommen, soweit nichts anderes angegeben ist."
         )
     licht = None
-    if args.licht:
+    gespeichert = vorhandenes_licht.get("licht")
+    if args.licht == LICHT_AUTO:
+        licht = licht_suchen(ha.register(), zustaende, kaffeemaschine, interaktiv)
+        if gespeichert and gespeichert != licht:
+            print(f"✓ Das Licht an der Maschine ist jetzt {licht} (vorher {gespeichert}).")
+    elif args.licht:
         licht = entitaet_bereitstellen(ha, args.licht, zustaende, LICHT_DOMAINS, "--licht")
-    elif vorhandenes_licht.get("licht") in zustaende:
-        licht = vorhandenes_licht["licht"]
-    elif vorhandenes_licht.get("licht"):
-        print(
-            f"⚠ Das gespeicherte Licht {vorhandenes_licht['licht']} gibt es nicht mehr – die "
-            "Licht-Automation bleibt unverändert. Neu angeben mit --licht <entity_id>."
-        )
+    elif gespeichert in zustaende:
+        licht = gespeichert
+    elif gespeichert:
+        # Das alte Licht ist weg – z. B. eine Steckdose gegen einen Zwischenschalter getauscht.
+        kandidaten = kandidaten_licht(ha.register(), zustaende, kaffeemaschine)
+        if len(kandidaten) == 1:
+            [(licht, beschreibung)] = kandidaten
+            print(f"✓ Das gespeicherte Licht {gespeichert} gibt es nicht mehr – ersetzt durch {licht} ({beschreibung}).")
+        elif kandidaten and interaktiv and len(kandidaten) <= MAX_ANGEBOT:
+            licht = licht_suchen(
+                ha.register(),
+                zustaende,
+                kaffeemaschine,
+                interaktiv,
+                f"Das gespeicherte Licht {gespeichert} gibt es nicht mehr – welches ist das neue?",
+            )
+            print(f"✓ Das Licht an der Maschine ist jetzt {licht} (vorher {gespeichert}).")
+        else:
+            liste = "".join(f"\n    {entity_id}  {beschreibung}" for entity_id, beschreibung in kandidaten[:15])
+            print(
+                f"⚠ Das gespeicherte Licht {gespeichert} gibt es nicht mehr – die Licht-Automation bleibt "
+                "unverändert. Ein neues Licht sucht --licht ohne Wert, oder direkt --licht <entity_id>."
+                + (f"\n  Infrage kommen:{liste}" if liste else "")
+            )
     if licht is None and (args.dunkel or args.dunkel_unter is not None):
         raise Abbruch("--dunkel braucht ein Licht an der Maschine: bitte --licht <entity_id> mit angeben.")
     dunkel, dunkel_unter = None, STANDARD_DUNKEL_UNTER
@@ -1747,7 +1853,8 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
         if not verfuegbar(licht, zustaende):
             print(
                 f"⚠ {licht} ist zurzeit nicht verfügbar – ist die Steckdose bzw. das Licht eingesteckt "
-                "und in der Zentrale erreichbar? Die Automation wird trotzdem angelegt."
+                "und in der Zentrale erreichbar? Die Automation wird trotzdem angelegt. Ein neues Licht "
+                "sucht --licht ohne Wert."
             )
         dunkel, dunkel_unter = dunkel_bestimmen(ha, args, zustaende, vorhandenes_licht, interaktiv)
 

@@ -9,7 +9,7 @@ import os
 import re
 import sys
 from collections.abc import Awaitable, Callable, Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -1296,6 +1296,7 @@ async def test_ueberspringen_der_aktivierung(
 
 HOMEMATIC = "homematicip_local"
 LICHT = "switch.led_kaffee"
+ZWISCHENSCHALTER = "switch.zwischenschalter_kaffee"  # der neue Zwischenschalter am LED Kaffee
 
 
 class Steckdose(SwitchEntity):
@@ -1331,6 +1332,28 @@ def steckdose(hass: HomeAssistant) -> Iterator[Callable[..., Awaitable[None]]]:
         yield partial(steckdose_einrichten, hass)
 
 
+class Zwischenschalter(SwitchEntity):
+    """Der neue Homematic-IP-Zwischenschalter, der die Steckdose „LED Kaffee“ ersetzt."""
+
+    _attr_should_poll = False
+
+    def __init__(self) -> None:
+        self._attr_name = "Zwischenschalter Kaffee"
+        self._attr_unique_id = "fsm-main"
+        self._attr_is_on = False
+        self._attr_device_info = DeviceInfo(
+            identifiers={(HOMEMATIC, "fsm")}, name="Zwischenschalter Kaffee", manufacturer="eQ-3", model="HmIP-FSM"
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self._attr_is_on = True
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self._attr_is_on = False
+        self.async_write_ha_state()
+
+
 class Helligkeitssensor(SensorEntity):
     """Die Beleuchtungsstärke eines Homematic-IP-Bewegungsmelders in der Küche."""
 
@@ -1349,10 +1372,15 @@ async def steckdose_einrichten(
     deaktiviert: bool = False,
     helligkeit: float | None = None,
     sensor_deaktiviert: bool = False,
+    zwischenschalter: bool = False,
+    ohne_alte: bool = False,
+    freezer: FrozenDateTimeFactory | None = None,
 ) -> None:
     """Legt die Steckdose „LED Kaffee“ (switch.led_kaffee) an – auf Wunsch deaktiviert –
     und mit ``helligkeit`` den Helligkeitssensor des Küchen-Bewegungsmelders (KUECHE_SENSOR),
-    der mit ``sensor_deaktiviert`` von Anfang an deaktiviert ist, wie Homematic(IP) Local es macht."""
+    der mit ``sensor_deaktiviert`` von Anfang an deaktiviert ist, wie Homematic(IP) Local es macht.
+    Mit ``zwischenschalter`` kommt der neue Zwischenschalter (ZWISCHENSCHALTER) dazu, mit ``freezer``
+    später angelegt als die Steckdose; ``ohne_alte`` lässt die Steckdose weg."""
     plattformen = ["switch"] + (["sensor"] if helligkeit is not None else [])
 
     async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -1365,7 +1393,7 @@ async def steckdose_einrichten(
     async def async_setup_switch(
         hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
     ) -> None:
-        async_add_entities([Steckdose()])
+        async_add_entities(([] if ohne_alte else [Steckdose()]) + ([Zwischenschalter()] if zwischenschalter else []))
 
     async def async_setup_sensor(
         hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -1401,6 +1429,12 @@ async def steckdose_einrichten(
             original_name="Bewegungsmelder Küche Beleuchtungsstärke",
             disabled_by=er.RegistryEntryDisabler.INTEGRATION,
         )
+    if freezer is not None and zwischenschalter and not ohne_alte and not deaktiviert:
+        # Die Steckdose gibt es schon etwas länger als den Zwischenschalter (kurz genug, dass der Token gilt).
+        er.async_get(hass).async_get_or_create(
+            "switch", HOMEMATIC, "psm-main", config_entry=eintrag, suggested_object_id="led_kaffee"
+        )
+        freezer.tick(timedelta(minutes=5))
     assert await hass.config_entries.async_setup(eintrag.entry_id)
     await hass.async_block_till_done()
 
@@ -1452,6 +1486,152 @@ async def test_licht_folgt_der_kaffeemaschine(
     code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
     assert code == 0, fehler
     assert len(gespeicherte_automationen(home_assistant)) == 2
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_licht_wird_gesucht(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    freezer: FrozenDateTimeFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--licht ohne Wert zeigt die Lichter mit Kaffee-Bezug, neu angelegte zuerst – Konrads Schalter nicht."""
+    await steckdose(zwischenschalter=True, freezer=freezer)
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT)
+    assert code == 0, fehler
+
+    # Ohne Terminal: klare Meldung mit beiden Kandidaten, der neue zuerst.
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht")
+    assert code == 1
+    assert "Mehrere Möglichkeiten für das Licht an der Maschine gefunden" in fehler
+    assert f"1) {ZWISCHENSCHALTER}  „Zwischenschalter Kaffee“, eQ-3 HmIP-FSM, aus, angelegt " in fehler
+    assert f"2) {LICHT}  „LED Kaffee“, eQ-3 HMIP-PSM, aus, angelegt " in fehler
+    assert "kaffeevollautomat" not in fehler  # Konrads eigene Schalter sind kein Licht
+    assert "--licht <entity_id>" in fehler
+
+    # Im Terminal: Nummer 1 – die Automation zeigt danach auf den Zwischenschalter.
+    with (
+        patch.object(sys.stdin, "isatty", return_value=True),
+        patch("builtins.input", side_effect=["1"]),
+    ):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht")
+    assert code == 0, fehler
+    assert "neu angelegte Geräte stehen oben" in ausgabe
+    assert f"✓ Das Licht an der Maschine ist jetzt {ZWISCHENSCHALTER} (vorher {LICHT})." in ausgabe
+    assert f"✓ Licht an der Maschine: {ZWISCHENSCHALTER} („Zwischenschalter Kaffee“)" in ausgabe
+    automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
+    assert automationen[installieren.LICHT_AUTOMATION_ID] == {
+        "id": installieren.LICHT_AUTOMATION_ID,
+        **installieren.licht_config(KAFFEEMASCHINE, ZWISCHENSCHALTER),
+    }
+
+    # Und die neue Automation schaltet wirklich den Zwischenschalter.
+    await maschine(home_assistant, True)
+    assert home_assistant.states.get(ZWISCHENSCHALTER).state == "on"
+    assert home_assistant.states.get(LICHT).state == "off"
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_verschwundenes_licht_wird_ersetzt(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ist das gespeicherte Licht weg und gibt es genau einen Kandidaten, übernimmt das Skript ihn."""
+    await steckdose(zwischenschalter=True)
+    helligkeit(home_assistant, "4")
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel", HELLIGKEIT
+    )
+    assert code == 0, fehler
+
+    # Die alte Steckdose verschwindet aus Home Assistant.
+    er.async_get(home_assistant).async_remove(LICHT)
+    await home_assistant.async_block_till_done()
+    home_assistant.states.async_remove(LICHT)
+    assert home_assistant.states.get(LICHT) is None
+
+    with patch.object(sys.stdin, "isatty", return_value=True), keine_rueckfrage():
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert (
+        f"✓ Das gespeicherte Licht {LICHT} gibt es nicht mehr – ersetzt durch {ZWISCHENSCHALTER} "
+        "(„Zwischenschalter Kaffee“, eQ-3 HmIP-FSM, aus, angelegt " in ausgabe
+    )
+    assert f"✓ Dunkel-Sensor: {HELLIGKEIT}" in ausgabe  # die Dunkel-Einstellungen bleiben
+    automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
+    assert automationen[installieren.LICHT_AUTOMATION_ID] == {
+        "id": installieren.LICHT_AUTOMATION_ID,
+        **installieren.licht_config(KAFFEEMASCHINE, ZWISCHENSCHALTER, HELLIGKEIT, 20),
+    }
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_verschwundenes_licht_ohne_ersatz(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ohne Kandidaten bleibt die Licht-Automation stehen, mit Hinweis auf die Suche."""
+    home_assistant.states.async_set(LICHT, "off", {"friendly_name": "LED Kaffee"})
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT)
+    assert code == 0, fehler
+    home_assistant.states.async_remove(LICHT)
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token)
+    assert code == 0, fehler
+    assert f"⚠ Das gespeicherte Licht {LICHT} gibt es nicht mehr – die Licht-Automation bleibt unverändert." in ausgabe
+    assert "--licht ohne Wert" in ausgabe
+    assert "Infrage kommen" not in ausgabe
+    assert len(gespeicherte_automationen(home_assistant)) == 2
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_altes_licht_nicht_verfuegbar_nennt_die_suche(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home_assistant.states.async_set(LICHT, "unavailable", {"friendly_name": "LED Kaffee"})
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT)
+    assert code == 0, fehler
+    assert f"⚠ {LICHT} ist zurzeit nicht verfügbar" in ausgabe
+    assert "Ein neues Licht sucht --licht ohne Wert." in ausgabe
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_kein_licht_gefunden(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Konrads eigene Schalter zählen nicht als Licht – ohne weitere Geräte gibt es eine klare Meldung."""
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht")
+    assert code == 1
+    assert "Kein Licht an der Maschine in Home Assistant gefunden" in fehler
+    assert "--licht <entity_id>" in fehler
+    assert gespeicherte_automationen(home_assistant) == []
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_licht_suche_ohne_kaffee_im_namen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Gibt es nichts mit „Kaffee“, zählt, was nach Licht oder Zwischenschalter klingt."""
+    home_assistant.states.async_set("switch.zwischenschalter_theke", "off", {"friendly_name": "Zwischenschalter Theke"})
+    home_assistant.states.async_set("switch.pumpe_garten", "off", {"friendly_name": "Pumpe Garten"})
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht")
+    assert code == 0, fehler
+    assert "✓ Licht an der Maschine: switch.zwischenschalter_theke („Zwischenschalter Theke“)" in ausgabe
 
 
 @pytest.mark.usefixtures("kaffeemaschine")
@@ -2068,6 +2248,55 @@ def test_helligkeitswoerter(text: str) -> None:
 @pytest.mark.parametrize("text", ["sensor.kuche_temperatur", "sensor.luxemburg_wetter", "switch.led_kaffee"])
 def test_keine_helligkeitswoerter(text: str) -> None:
     assert not installieren.HELLIGKEIT_WOERTER.search(text)
+
+
+def test_kandidaten_licht_sortierung() -> None:
+    """Kaffee-Bezug zuerst, verfügbare vor nicht verfügbaren, neu vor alt – Konrad und die CCU nie."""
+    from types import SimpleNamespace
+
+    geraete = {"hc": {"id": "hc"}, "ccu": {"id": "ccu"}, "psm": {"id": "psm", "manufacturer": "eQ-3", "model": "HMIP-PSM"}}
+    entitaeten = {
+        "switch.konrad_einschalter": {"entity_id": "switch.konrad_einschalter", "device_id": "hc", "created_at": 900},
+        "switch.raspberrymatic_p_kaffee": {"entity_id": "switch.raspberrymatic_p_kaffee", "device_id": "ccu", "created_at": 900},
+        "switch.led_kaffee": {"entity_id": "switch.led_kaffee", "device_id": "psm", "created_at": 100},
+        "switch.zwischenschalter_kaffee": {"entity_id": "switch.zwischenschalter_kaffee", "created_at": 200},
+        "switch.kaffee_alt": {"entity_id": "switch.kaffee_alt", "created_at": 300},
+    }
+    register = SimpleNamespace(
+        entitaeten=entitaeten,
+        geraete=geraete,
+        ist_home_connect=lambda geraet: geraet["id"] == "hc",
+        ist_gross=lambda geraet: geraet["id"] == "ccu",
+    )
+
+    def zustand(entity_id: str, state: str, name: str) -> dict[str, Any]:
+        return {"entity_id": entity_id, "state": state, "attributes": {"friendly_name": name}}
+
+    zustaende = {
+        "switch.konrad_einschalter": zustand("switch.konrad_einschalter", "off", "Konrad Einschalter"),
+        "switch.raspberrymatic_p_kaffee": zustand("switch.raspberrymatic_p_kaffee", "off", "Kaffee am Morgen"),
+        "switch.led_kaffee": zustand("switch.led_kaffee", "off", "LED Kaffee"),
+        "switch.zwischenschalter_kaffee": zustand("switch.zwischenschalter_kaffee", "off", "Zwischenschalter Kaffee"),
+        "switch.kaffee_alt": zustand("switch.kaffee_alt", "unavailable", "Kaffee alt"),
+        "light.flur": zustand("light.flur", "on", "Flur"),
+        "sensor.kaffee_zaehler": zustand("sensor.kaffee_zaehler", "5", "Kaffee Zähler"),
+    }
+    assert installieren.kandidaten_licht(register, zustaende, "switch.konrad_einschalter") == [
+        ("switch.zwischenschalter_kaffee", "„Zwischenschalter Kaffee“, aus, angelegt 01.01.1970"),
+        ("switch.led_kaffee", "„LED Kaffee“, eQ-3 HMIP-PSM, aus, angelegt 01.01.1970"),
+        ("switch.kaffee_alt", "„Kaffee alt“, nicht verfügbar, angelegt 01.01.1970"),
+    ]
+    # Ohne Kaffee-Bezug: erst, was nach Licht klingt; sonst alle.
+    for entity_id in ("switch.led_kaffee", "switch.zwischenschalter_kaffee", "switch.kaffee_alt"):
+        del zustaende[entity_id]
+    assert installieren.kandidaten_licht(register, zustaende, "switch.konrad_einschalter") == [
+        ("light.flur", "„Flur“, an")
+    ]
+    zustaende["light.flur"]["attributes"]["friendly_name"] = "Flur"
+    zustaende["switch.pumpe"] = zustand("switch.pumpe", "off", "Pumpe")
+    assert [e for e, _ in installieren.kandidaten_licht(register, zustaende)] == ["light.flur"]
+    del zustaende["light.flur"]
+    assert [e for e, _ in installieren.kandidaten_licht(register, zustaende)] == ["switch.pumpe"]
 
 
 def test_deaktivierte_helligkeitssensoren_kueche_zuerst() -> None:

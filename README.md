@@ -86,8 +86,9 @@ aus der vorhandenen Automation sowie Licht, Dunkel-Sensor und Schwelle aus der
 Licht-Automation, soweit du nichts anderes angibst. So reicht z. B.
 `python3 installieren.py --licht switch.led_kaffee`, um nur das Licht zu
 ergänzen, und danach `python3 installieren.py --dunkel`, um es nur noch bei
-Dunkelheit zu schalten. Nützliche Optionen (`python3 installieren.py --hilfe`
-zeigt alle):
+Dunkelheit zu schalten. Ist das gespeicherte Licht verschwunden und gibt es
+genau einen Ersatz, übernimmt das Skript ihn von selbst. Nützliche Optionen
+(`python3 installieren.py --hilfe` zeigt alle):
 
 | Option | Wirkung |
 | --- | --- |
@@ -97,7 +98,7 @@ zeigt alle):
 | `--von 6:00 --bis 10:00` | Anderes Zeitfenster. |
 | `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen; `--alarmanlage` auch mehrfach, eine deaktivierte Entität wird dabei aktiviert. |
 | `--unscharf Unscharf` | Zustand, der „unscharf“ bedeutet, wenn die Alarmanlage keine Alarmzentrale ist. |
-| `--licht switch.led_kaffee` | Ein Licht oder eine Steckdose an der Maschine (`light.…` oder `switch.…`) geht in einer zweiten Automation mit der Kaffeemaschine an und aus – egal ob die Automation, Home Assistant oder jemand am Gerät sie einschaltet. Eine deaktivierte Entität wird dabei aktiviert. |
+| `--licht switch.led_kaffee` | Ein Licht oder eine Steckdose an der Maschine (`light.…` oder `switch.…`) geht in einer zweiten Automation mit der Kaffeemaschine an und aus – egal ob die Automation, Home Assistant oder jemand am Gerät sie einschaltet. Ohne Wert sucht das Skript das Licht selbst: Geräte mit „Kaffee“ im Namen, neu angelegte zuerst – so übernimmt `python3 installieren.py --licht` eine ersetzte Steckdose. Eine deaktivierte Entität wird dabei aktiviert. |
 | `--dunkel` | Das Licht geht nur an, wenn es dunkel ist. Ohne Wert sucht das Skript einen Helligkeitssensor (Geräteklasse „illuminance“ oder Einheit lx), bevorzugt einen aus der Küche, etwa den des Bewegungsmelders; deaktivierte Helligkeitssensoren bietet es zum Aktivieren an. Sonst `--dunkel sensor.…`. `--dunkel aus` entfernt die Bedingung wieder. |
 | `--dunkel-unter 20` | Bis zu welcher Helligkeit es „dunkel“ ist (Standard 20 lx). Darüber bleibt das Licht aus bzw. geht aus, sobald es hell wird. |
 | `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
