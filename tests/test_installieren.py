@@ -2173,6 +2173,205 @@ async def test_nur_anzeigen_mit_dunkel(
     assert gespeicherte_automationen(home_assistant) == []
 
 
+# --- Prüfung (--pruefen): warum ist das Licht an oder aus? -------------------
+
+
+def fenster(stunden_von: int, stunden_bis: int) -> list[str]:
+    """Ein Zeitfenster relativ zu jetzt, als Optionen für das Skript."""
+    jetzt = datetime.now(BERLIN)  # Home Assistant rechnet in seiner Zeitzone
+    von = (jetzt + timedelta(hours=stunden_von)).strftime("%H:%M")
+    bis = (jetzt + timedelta(hours=stunden_bis)).strftime("%H:%M")
+    return ["--von", von, "--bis", bis]
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_pruefen_erklaert_zu_hell(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Bleibt das Licht aus, weil es hell ist, sagt --pruefen das – samt Messwert und letztem Lauf."""
+    await steckdose()
+    helligkeit(home_assistant, "250")
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel", HELLIGKEIT
+    )
+    assert code == 0, fehler
+    await maschine(home_assistant, True)
+    assert home_assistant.states.get(LICHT).state == "off"
+
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--pruefen")
+    assert code == 0, fehler
+    assert "Prüfung – Stand jetzt:" in ausgabe
+    assert f"  Kaffeemaschine {KAFFEEMASCHINE}: an (seit " in ausgabe
+    assert f"  Licht {LICHT} („LED Kaffee“): aus" in ausgabe
+    assert f"  Dunkel-Sensor {HELLIGKEIT}: 250 lx, Grenze 20 lx – zuletzt gemeldet " in ausgabe
+    assert "Urteil: Zu hell für das Licht (250 > 20)." in ausgabe
+    assert "nur bei Bewegung" not in ausgabe  # der Wert ist frisch
+    assert f"Letzte Läufe „{installieren.LICHT_ALIAS}“:" in ausgabe
+    assert "  Maschine an → Es ist hell – das Licht bleibt aus (Helligkeit 250 > 20)." in ausgabe
+    assert f"Letzte Läufe „{installieren.ALIAS}“:" in ausgabe
+    assert len(gespeicherte_automationen(home_assistant)) == 2  # nichts geändert
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_pruefen_alter_sensorwert(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    freezer: FrozenDateTimeFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ein alter Helligkeitswert bekommt den Hinweis, dass der Melder nur bei Bewegung meldet."""
+    await steckdose()
+    helligkeit(home_assistant, "53")
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel", HELLIGKEIT
+    )
+    assert code == 0, fehler
+    freezer.tick(timedelta(minutes=5))
+    await maschine(home_assistant, True)
+    with patch("installieren.VERALTET_MINUTEN", 1):
+        code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--pruefen")
+    assert code == 0, fehler
+    assert "(vor 5 Min.)" in ausgabe
+    assert "Urteil: Zu hell für das Licht (53 > 20). Der Wert ist 5 Min. alt – der Melder meldet die Helligkeit nur bei Bewegung." in ausgabe
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_pruefen_licht_muesste_an_sein(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ist es dunkel und das Licht trotzdem aus, zeigt --pruefen auf das Gerät."""
+    await steckdose()
+    helligkeit(home_assistant, "3")
+    code, _, fehler = await skript(
+        home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT, "--dunkel", HELLIGKEIT
+    )
+    assert code == 0, fehler
+
+    async def ignorieren(self: Steckdose, **kwargs: Any) -> None:
+        pass
+
+    with patch.object(Steckdose, "async_turn_on", ignorieren):
+        await maschine(home_assistant, True)
+    assert home_assistant.states.get(LICHT).state == "off"
+
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--pruefen")
+    assert code == 0, fehler
+    assert f"Urteil: Das Licht müsste an sein, ist aber aus. Prüfe in Home Assistant, ob sich {LICHT} von Hand" in ausgabe
+    assert "  Maschine an → Licht eingeschaltet." in ausgabe  # die Automation hat es versucht
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_pruefen_ohne_automation(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--pruefen")
+    assert code == 0, fehler
+    assert "ist noch nicht eingerichtet" in ausgabe
+    assert gespeicherte_automationen(home_assistant) == []
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_pruefen_hauptautomation(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Auch die Kaffee-Automation wird erklärt: außerhalb des Zeitfensters, eingeschaltet, schon an."""
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, *fenster(2, 3))
+    assert code == 0, fehler
+    home_assistant.states.async_set(ALARMANLAGE, "disarmed")
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"
+
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, *fenster(-1, 1))
+    assert code == 0, fehler
+    home_assistant.states.async_set(ALARMANLAGE, "armed_night")
+    home_assistant.states.async_set(ALARMANLAGE, "disarmed")
+    await home_assistant.async_block_till_done()
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
+    home_assistant.states.async_set(ALARMANLAGE, "armed_night")
+    home_assistant.states.async_set(ALARMANLAGE, "disarmed")
+    await home_assistant.async_block_till_done()
+
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--pruefen")
+    assert code == 0, fehler
+    assert "Urteil: Es ist kein Licht an der Maschine eingerichtet (--licht)." in ausgabe
+    laeufe = [zeile for zeile in ausgabe.splitlines() if zeile.startswith("  ") and "Alarmanlage → disarmed" in zeile]
+    assert [zeile.split(" → ", 1)[1] for zeile in laeufe] == [
+        "disarmed → Kaffeemaschine war schon an.",
+        "disarmed → Kaffeemaschine eingeschaltet.",
+        "disarmed → außerhalb des Zeitfensters.",
+    ]
+
+
+def test_lauf_erklaeren() -> None:
+    """Die Läufe aus der Ablaufverfolgung werden zu einem Satz – auch bei Fehlern und lückenhaften Daten."""
+    def lauf(trace: dict[str, Any], **extra: Any) -> dict[str, Any]:
+        return {"timestamp": {"start": "2026-11-14T16:02:11.123456+00:00"}, "trace": trace, **extra}
+
+    def ausloeser(kennung: str, zustand: str) -> dict[str, Any]:
+        return {"trigger/0": [{"changed_variables": {"trigger": {"id": kennung, "to_state": {"state": zustand}}}}]}
+
+    hell = lauf({
+        **ausloeser("an", "on"),
+        "action/0": [{"result": {"choice": 1}}],
+        "action/0/choose/1/conditions/1/entity_id/0": [{"result": {"result": True, "state": 250.0, "wanted_state_above": 20.0}}],
+    })
+    assert installieren.lauf_erklaeren(hell, "licht").endswith("  Maschine an → Es ist hell – das Licht bleibt aus (Helligkeit 250 > 20).")
+    assert installieren.lauf_erklaeren(hell, "licht").startswith("  14.11. ")
+    # Traf die Bedingung zu, nennt Home Assistant nur den Messwert – die Schwelle kommt dann von uns.
+    hell_ohne_schwelle = lauf({
+        **ausloeser("an", "on"),
+        "action/0": [{"result": {"choice": 1}}],
+        "action/0/choose/1/conditions/1/entity_id/0": [{"result": {"result": True, "state": 250.0}}],
+    })
+    assert installieren.lauf_erklaeren(hell_ohne_schwelle, "licht", 20).endswith("(Helligkeit 250 > 20).")
+    assert installieren.lauf_erklaeren(hell_ohne_schwelle, "licht").endswith("das Licht bleibt aus.")
+    dunkel = lauf({**ausloeser("dunkel", "3.0"), "action/0": [{"result": {"choice": 2}}]})
+    assert installieren.lauf_erklaeren(dunkel, "licht").endswith("  Helligkeit 3.0 (dunkel) → Licht eingeschaltet.")
+    aus = lauf({**ausloeser("aus", "off"), "action/0": [{"result": {"choice": 0}}]})
+    assert installieren.lauf_erklaeren(aus, "licht").endswith("  Maschine aus → Licht ausgeschaltet.")
+    einfach = lauf({**ausloeser("an", "on"), "action/0": [{"result": {"choice": "then"}}]})
+    assert installieren.lauf_erklaeren(einfach, "licht").endswith("  Maschine an → Licht eingeschaltet.")
+    nichts = lauf({**ausloeser("hell", "80")}, trigger="numeric state of sensor.x")
+    assert installieren.lauf_erklaeren(nichts, "licht").endswith("  Helligkeit 80 (hell) → nichts zu tun (Maschine aus).")
+    kaputt = lauf({**ausloeser("an", "on"), "action/0": [{"result": {"choice": 2}}]}, error="Dienst nicht gefunden", script_execution="error")
+    assert installieren.lauf_erklaeren(kaputt, "licht").endswith("Licht eingeschaltet – Fehler: Dienst nicht gefunden.")
+    leer = {"timestamp": {}, "trace": {}, "trigger": "state of sensor.alarm"}
+    assert installieren.lauf_erklaeren(leer, "kaffee") == "  unbekannte Zeit  state of sensor.alarm → Bedingung nicht erfüllt."
+    zeitfenster = lauf({**ausloeser(None, "disarmed"), "condition/0": [{"result": {"result": False}}]})
+    assert installieren.lauf_erklaeren(zeitfenster, "kaffee").endswith("  Alarmanlage → disarmed → außerhalb des Zeitfensters.")
+
+
+@pytest.mark.parametrize(
+    ("minuten", "erwartet"),
+    [(0, "vor 0 Min."), (5, "vor 5 Min."), (90, "vor 1 Std. 30 Min."), (120, "vor 2 Std."), (1440, "vor 1 Tag"), (3000, "vor 2 Tagen")],
+)
+def test_alter_text(minuten: int, erwartet: str) -> None:
+    assert installieren.alter_text(minuten) == erwartet
+
+
+def test_zeit_lesen() -> None:
+    zeit = installieren.zeit_lesen("2026-11-14T16:02:11.1234567+00:00")  # 7 Nachkommastellen, wie sie vorkommen können
+    assert zeit is not None and zeit.utcoffset() is not None
+    assert installieren.zeit_lesen("2026-11-14T16:02:11Z").hour == installieren.zeit_lesen("2026-11-14T16:02:11+00:00").hour
+    assert installieren.zeit_lesen("gestern") is None and installieren.zeit_lesen(None) is None
+
+
 # --- Kleinkram ---------------------------------------------------------------
 
 

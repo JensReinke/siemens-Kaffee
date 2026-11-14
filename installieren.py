@@ -95,6 +95,8 @@ STANDARD_VON = "05:00"
 STANDARD_BIS = "09:00"
 ZEITLIMIT = 30  # Sekunden pro Anfrage
 AUSSCHALT_SEKUNDEN = 30  # so lange wartet der Probelauf, bis die Maschine wieder aus ist
+VERALTET_MINUTEN = 60  # ab diesem Alter gilt ein Helligkeitswert bei --pruefen als alt
+LAEUFE = 5  # so viele Läufe je Automation zeigt --pruefen (mehr merkt sich Home Assistant nicht)
 PROBELAUF_SCHON_AN = "Die Kaffeemaschine ist schon an – zum Ausprobieren bitte erst ausschalten."
 STANDARD_UNSCHARF = "disarmed"  # Zustand „unscharf“ einer Alarmzentrale
 
@@ -1417,6 +1419,215 @@ def probelauf(ha: HomeAssistant, automation: str, kaffeemaschine: str) -> str:
     )
 
 
+def zeit_lesen(text: Any) -> Optional[datetime.datetime]:
+    """Ein Zeitstempel von Home Assistant (ISO 8601, UTC) als Ortszeit – auch mit Python 3.9."""
+    if not isinstance(text, str):
+        return None
+    text = re.sub(r"(\.\d{6})\d+", r"\1", text.strip().replace("Z", "+00:00"))
+    try:
+        zeit = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if zeit.tzinfo is None:
+        zeit = zeit.replace(tzinfo=datetime.timezone.utc)
+    return zeit.astimezone()
+
+
+def alter_text(minuten: float) -> str:
+    """„vor 5 Min.“, „vor 1 Std. 30 Min.“, „vor 2 Tagen“"""
+    minuten = int(minuten)
+    if minuten < 60:
+        return f"vor {minuten} Min."
+    if minuten < 24 * 60:
+        stunden, rest = divmod(minuten, 60)
+        return f"vor {stunden} Std." + (f" {rest} Min." if rest else "")
+    tage = minuten // (24 * 60)
+    return f"vor {tage} Tag" + ("" if tage == 1 else "en")
+
+
+def an_aus(zustand: Optional[dict[str, Any]]) -> str:
+    if zustand is None:
+        return "unbekannt (keine solche Entität)"
+    state = str(zustand.get("state"))
+    return {"on": "an", "off": "aus", "unavailable": "nicht verfügbar", "unknown": "unbekannt"}.get(state, state)
+
+
+def laeufe(ha: HomeAssistant, automation_id: str, anzahl: int = LAEUFE) -> list[dict[str, Any]]:
+    """Die letzten Läufe einer Automation aus der Ablaufverfolgung von Home Assistant, neueste zuerst."""
+    ws = WebSocket(ha.url, ha.token)
+    try:
+        kurz = ws.befehl(type="trace/list", domain="automation", item_id=automation_id) or []
+        kurz = sorted(
+            (k for k in kurz if isinstance(k, dict)),
+            key=lambda k: str((k.get("timestamp") or {}).get("start") or ""),
+            reverse=True,
+        )[:anzahl]
+        ergebnis = []
+        for eintrag in kurz:
+            try:
+                voll = ws.befehl(
+                    type="trace/get", domain="automation", item_id=automation_id, run_id=eintrag["run_id"]
+                )
+            except Abbruch:
+                voll = {}
+            ergebnis.append({**eintrag, "trace": (voll or {}).get("trace") or {}})
+        return ergebnis
+    finally:
+        ws.schliessen()
+
+
+def _ergebnis(trace: dict[str, Any], pfad: str) -> dict[str, Any]:
+    schritte = trace.get(pfad) or []
+    return (schritte[-1].get("result") or {}) if schritte and isinstance(schritte[-1], dict) else {}
+
+
+def lauf_erklaeren(lauf: dict[str, Any], art: str, grenze: Optional[float] = None) -> str:
+    """Ein Lauf aus der Ablaufverfolgung in einem Satz: Uhrzeit, Auslöser, Ergebnis.
+
+    ``art`` ist „licht“ für die Licht-Automation oder „kaffee“ für die Hauptautomation;
+    ``grenze`` die Dunkel-Schwelle, falls die Ablaufverfolgung sie nicht selbst nennt.
+    """
+    trace = lauf.get("trace") or {}
+    zeit = zeit_lesen((lauf.get("timestamp") or {}).get("start"))
+    wann = f"{zeit:%d.%m. %H:%M:%S}" if zeit else "unbekannte Zeit"
+
+    ausloeser: dict[str, Any] = {}
+    for pfad, schritte in trace.items():
+        if pfad.startswith("trigger/") and schritte and isinstance(schritte[0], dict):
+            ausloeser = (schritte[0].get("changed_variables") or {}).get("trigger") or {}
+            break
+    zu = ausloeser.get("to_state") or {}
+    zustand = str(zu.get("state")) if isinstance(zu, dict) and "state" in zu else None
+    kennung = ausloeser.get("id")
+    if art == "licht":
+        wer = {
+            "an": "Maschine an",
+            "aus": "Maschine aus",
+            "hell": f"Helligkeit {zustand} (hell)" if zustand else "Helligkeit gestiegen",
+            "dunkel": f"Helligkeit {zustand} (dunkel)" if zustand else "Helligkeit gesunken",
+        }.get(str(kennung), lauf.get("trigger") or "unbekannter Auslöser")
+    else:
+        wer = f"Alarmanlage → {zustand}" if zustand else (lauf.get("trigger") or "unbekannter Auslöser")
+
+    was: str
+    if art == "licht":
+        wahl = _ergebnis(trace, "action/0").get("choice")
+        if wahl == 0 or wahl == "else":
+            was = "Licht ausgeschaltet"
+        elif wahl == 1:
+            # Home Assistant notiert den Messwert; die Schwelle nur, wenn die Bedingung nicht zutraf.
+            messwert = _ergebnis(trace, "action/0/choose/1/conditions/1/entity_id/0")
+            wert = messwert.get("state")
+            schwelle = messwert.get("wanted_state_above", grenze)
+            was = "Es ist hell – das Licht bleibt aus"
+            if isinstance(wert, (int, float)) and isinstance(schwelle, (int, float)):
+                was += f" (Helligkeit {wert:g} > {schwelle:g})"
+        elif wahl == 2 or wahl == "then":
+            was = "Licht eingeschaltet"
+        else:
+            was = "nichts zu tun (Maschine aus)"
+    else:
+        if _ergebnis(trace, "condition/0").get("result") is False:
+            was = "außerhalb des Zeitfensters"
+        elif _ergebnis(trace, "condition/1").get("result") is False:
+            was = "Kaffeemaschine war schon an"
+        elif "action/0" in trace:
+            was = "Kaffeemaschine eingeschaltet"
+        else:
+            was = "Bedingung nicht erfüllt"
+    fehler = lauf.get("error")
+    ausfuehrung = lauf.get("script_execution")
+    # „failed_conditions“ heißt nur: eine Bedingung traf nicht zu – das steht schon im Ergebnis.
+    if fehler or (ausfuehrung and ausfuehrung not in ("finished", "failed_conditions")):
+        was += f" – Fehler: {fehler or ausfuehrung}"
+    return f"  {wann}  {wer} → {was}."
+
+
+def pruefung(ha: HomeAssistant, zustaende: dict[str, dict[str, Any]]) -> str:
+    """Erklärt in Klartext, warum das Licht an oder aus ist – mit den letzten Läufen beider Automationen."""
+    haupt = uebernehmen(vorhandene_automation(ha) or {})
+    if not haupt.get("kaffeemaschine"):
+        return (
+            f"Die Automation „{ALIAS}“ ist noch nicht eingerichtet – bitte das Skript erst einmal ohne "
+            "--pruefen ausführen."
+        )
+    licht_einst = licht_uebernehmen(vorhandene_automation(ha, LICHT_AUTOMATION_ID) or {})
+    jetzt = datetime.datetime.now().astimezone()
+
+    def seit(zustand: Optional[dict[str, Any]]) -> str:
+        zeit = zeit_lesen((zustand or {}).get("last_changed"))
+        return f" (seit {zeit:%H:%M})" if zeit else ""
+
+    kaffeemaschine = haupt["kaffeemaschine"]
+    maschine = zustaende.get(kaffeemaschine)
+    zeilen = ["Prüfung – Stand jetzt:", f"  Kaffeemaschine {kaffeemaschine}: {an_aus(maschine)}{seit(maschine)}"]
+
+    licht = licht_einst.get("licht")
+    dunkel = licht_einst.get("dunkel")
+    grenze = licht_einst.get("dunkel_unter", STANDARD_DUNKEL_UNTER)
+    licht_zustand = zustaende.get(licht) if licht else None
+    sensor = zustaende.get(dunkel) if dunkel else None
+    wert = helligkeit(sensor) if sensor else None
+    alter: Optional[float] = None
+    if licht:
+        name = f" („{name_von(licht_zustand)}“)" if licht_zustand else ""
+        zeilen.append(f"  Licht {licht}{name}: {an_aus(licht_zustand)}{seit(licht_zustand)}")
+    if dunkel:
+        gemeldet = zeit_lesen((sensor or {}).get("last_updated"))
+        wann = ""
+        if gemeldet:
+            alter = (jetzt - gemeldet).total_seconds() / 60
+            wann = f" – zuletzt gemeldet {gemeldet:%H:%M} ({alter_text(alter)})"
+        messung = helligkeit_text(sensor) if sensor else "keine solche Entität"
+        zeilen.append(f"  Dunkel-Sensor {dunkel}: {messung}, Grenze {mit_einheit(grenze, sensor or {})}{wann}")
+
+    maschine_an = (maschine or {}).get("state") == "on"
+    if not licht:
+        urteil = "Es ist kein Licht an der Maschine eingerichtet (--licht)."
+    elif licht_zustand is None:
+        urteil = f"{licht} gibt es in Home Assistant nicht mehr – ein neues Licht sucht --licht ohne Wert."
+    elif not verfuegbar(licht, zustaende):
+        urteil = (
+            f"{licht} ist nicht verfügbar – Home Assistant erreicht den Schalter nicht. Ist er eingesteckt "
+            "und in der Zentrale angelernt?"
+        )
+    elif not maschine_an:
+        urteil = "Die Kaffeemaschine ist aus, deshalb ist das Licht aus. Zum Testen die Maschine einschalten oder --probelauf."
+    elif dunkel and wert is not None and wert > grenze:
+        urteil = f"Zu hell für das Licht ({wert:g} > {grenze:g})."
+        if alter is not None and alter >= VERALTET_MINUTEN:
+            urteil += (
+                f" Der Wert ist {alter_text(alter)[4:]} alt – der Melder meldet die Helligkeit nur bei Bewegung. "
+                "Einmal durch die Küche gehen, dann meldet er neu."
+            )
+        urteil += " Bleibt es über der Grenze, ist das Küchenlicht zu hell: Grenze mit --dunkel-unter anheben oder --dunkel aus."
+    elif (licht_zustand or {}).get("state") == "on":
+        urteil = "Alles wie gewünscht: Maschine an, Licht an."
+    else:
+        urteil = (
+            f"Das Licht müsste an sein, ist aber aus. Prüfe in Home Assistant, ob sich {licht} von Hand "
+            "schalten lässt – reagiert der Schalter nicht, liegt es am Gerät, nicht an der Automation."
+        )
+    zeilen.append(f"Urteil: {urteil}")
+
+    for automation_id, alias, art in (
+        (LICHT_AUTOMATION_ID, LICHT_ALIAS, "licht"),
+        (AUTOMATION_ID, ALIAS, "kaffee"),
+    ):
+        if art == "licht" and not licht:
+            continue
+        try:
+            runs = laeufe(ha, automation_id)
+        except Abbruch as fehler:
+            zeilen.append(f"Letzte Läufe „{alias}“: nicht abrufbar ({fehler})")
+            continue
+        zeilen.append(f"Letzte Läufe „{alias}“:")
+        zeilen += [lauf_erklaeren(lauf, art, grenze if art == "licht" else None) for lauf in runs] or [
+            "  (noch keiner)"
+        ]
+    return "\n".join(zeilen)
+
+
 def wieder_ausschalten(ha: HomeAssistant, kaffeemaschine: str, sekunden: Optional[int] = None) -> str:
     """Nach dem Probelauf: Die Maschine wieder ausschalten – sie war vorher aus."""
     sekunden = AUSSCHALT_SEKUNDEN if sekunden is None else sekunden
@@ -1572,6 +1783,14 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Nur ausgeben, was Home Assistant über Home Connect und Hausgeräte weiß – zur Fehlersuche",
     )
     parser.add_argument(
+        "--pruefen",
+        action="store_true",
+        help=(
+            "Nur prüfen, ob die Automationen tun, was sie sollen: aktuelle Zustände, Alter des "
+            "Helligkeitswerts und die letzten Läufe in Klartext – nichts ändern"
+        ),
+    )
+    parser.add_argument(
         "--probelauf",
         action="store_true",
         help=(
@@ -1718,6 +1937,9 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
     zustaende = {z["entity_id"]: z for z in ha.get_json("/api/states")}
     if args.diagnose:
         print(diagnose_ausfuehrlich(ha.register(), zustaende))
+        return 0
+    if args.pruefen:
+        print(pruefung(ha, zustaende))
         return 0
 
     # Eine vorhandene Automation gibt die Einstellungen vor – ein zweiter Aufruf

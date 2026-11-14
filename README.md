@@ -95,6 +95,7 @@ genau einen Ersatz, übernimmt das Skript ihn von selbst. Nützliche Optionen
 | `--probelauf` | Löst die Automation nach dem Einrichten einmal aus – die Kaffeemaschine geht wirklich an und danach wieder aus (`--anlassen` lässt sie an). Mit `--licht` zeigt der Probelauf auch, ob das Licht mitgeht. |
 | `--nur-anzeigen` | Zeigt nur, was eingerichtet würde, ändert nichts. |
 | `--diagnose` | Zeigt nur, was Home Assistant über Home Connect und Hausgeräte weiß (Integrationen mit Zustand, Geräte, alle Entitäten), zur Fehlersuche. |
+| `--pruefen` | Erklärt in Klartext, warum das Licht gerade an oder aus ist: Zustand von Kaffeemaschine, Licht und Helligkeitssensor (mit Alter des Messwerts) und die letzten Läufe beider Automationen aus der Ablaufverfolgung von Home Assistant. Ändert nichts. |
 | `--von 6:00 --bis 10:00` | Anderes Zeitfenster. |
 | `--alarmanlage …`, `--kaffeemaschine …` | Entitäts-IDs vorgeben statt suchen zu lassen; `--alarmanlage` auch mehrfach, eine deaktivierte Entität wird dabei aktiviert. |
 | `--unscharf Unscharf` | Zustand, der „unscharf“ bedeutet, wenn die Alarmanlage keine Alarmzentrale ist. |
