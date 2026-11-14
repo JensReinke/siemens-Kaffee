@@ -60,6 +60,7 @@ LICHT_AUTOMATION_ID = "siemens_kaffee_licht"
 LICHT_ALIAS = "Licht an der Kaffeemaschine folgt der Kaffeemaschine"
 LICHT_DOMAINS = ("light", "switch")
 LICHT_AUTO = "auto"  # --licht ohne Wert: Licht suchen, neu angelegte Geräte zuerst
+NEU_TAGE = 7  # so lange gilt ein Gerät in der Lichtsuche als „neu angelegt“
 LICHT_WOERTER = re.compile(
     r"led|licht|light|lampe|leuchte|zwischenschalter|steckdose|plug|strip", re.IGNORECASE
 )
@@ -540,7 +541,8 @@ def licht_beschreibung(
     teile.append({"on": "an", "off": "aus", "unavailable": "nicht verfügbar"}.get(state, state))
     if entitaet and entitaet.get("created_at"):
         angelegt = datetime.datetime.fromtimestamp(float(entitaet["created_at"]))
-        teile.append(f"angelegt {angelegt:%d.%m.%Y}")
+        neu = datetime.datetime.now() - angelegt <= datetime.timedelta(days=NEU_TAGE)
+        teile.append(f"{'neu angelegt am' if neu else 'angelegt'} {angelegt:%d.%m.%Y}")
     return ", ".join(teile)
 
 
@@ -584,8 +586,11 @@ def licht_suchen(
     kaffeemaschine: str,
     interaktiv: bool,
     hinweis: str = LICHT_HINWEIS,
-) -> str:
-    """Sucht das Licht an der Maschine – automatisch, per Rückfrage oder mit klarer Meldung."""
+) -> tuple[str, str]:
+    """Sucht das Licht an der Maschine – automatisch, per Rückfrage oder mit klarer Meldung.
+
+    Gibt die Entitäts-ID und ihre Beschreibung (Name, Modell, Zustand, Anlegedatum) zurück.
+    """
     kandidaten = kandidaten_licht(register, zustaende, kaffeemaschine)
     if len(kandidaten) > MAX_ANGEBOT:
         raise Abbruch(
@@ -596,7 +601,7 @@ def licht_suchen(
     [licht] = auswaehlen(
         kandidaten, "Kein Licht an der Maschine", "das Licht an der Maschine", "--licht", interaktiv, hinweis
     )
-    return licht
+    return licht, dict(kandidaten)[licht]
 
 
 def verfuegbar(entity_id: str, zustaende: dict[str, dict[str, Any]]) -> bool:
@@ -1814,7 +1819,11 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
     licht = None
     gespeichert = vorhandenes_licht.get("licht")
     if args.licht == LICHT_AUTO:
-        licht = licht_suchen(ha.register(), zustaende, kaffeemaschine, interaktiv)
+        licht, beschreibung = licht_suchen(ha.register(), zustaende, kaffeemaschine, interaktiv)
+        print(
+            f"✓ Licht gesucht: {licht} ({beschreibung})"
+            + (" – wie bisher." if licht == gespeichert else ".")
+        )
         if gespeichert and gespeichert != licht:
             print(f"✓ Das Licht an der Maschine ist jetzt {licht} (vorher {gespeichert}).")
     elif args.licht:
@@ -1828,13 +1837,14 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
             [(licht, beschreibung)] = kandidaten
             print(f"✓ Das gespeicherte Licht {gespeichert} gibt es nicht mehr – ersetzt durch {licht} ({beschreibung}).")
         elif kandidaten and interaktiv and len(kandidaten) <= MAX_ANGEBOT:
-            licht = licht_suchen(
+            licht, beschreibung = licht_suchen(
                 ha.register(),
                 zustaende,
                 kaffeemaschine,
                 interaktiv,
                 f"Das gespeicherte Licht {gespeichert} gibt es nicht mehr – welches ist das neue?",
             )
+            print(f"✓ Licht gesucht: {licht} ({beschreibung}).")
             print(f"✓ Das Licht an der Maschine ist jetzt {licht} (vorher {gespeichert}).")
         else:
             liste = "".join(f"\n    {entity_id}  {beschreibung}" for entity_id, beschreibung in kandidaten[:15])

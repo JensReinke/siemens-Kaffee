@@ -1506,8 +1506,8 @@ async def test_licht_wird_gesucht(
     code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht")
     assert code == 1
     assert "Mehrere Möglichkeiten für das Licht an der Maschine gefunden" in fehler
-    assert f"1) {ZWISCHENSCHALTER}  „Zwischenschalter Kaffee“, eQ-3 HmIP-FSM, aus, angelegt " in fehler
-    assert f"2) {LICHT}  „LED Kaffee“, eQ-3 HMIP-PSM, aus, angelegt " in fehler
+    assert f"1) {ZWISCHENSCHALTER}  „Zwischenschalter Kaffee“, eQ-3 HmIP-FSM, aus, neu angelegt am " in fehler
+    assert f"2) {LICHT}  „LED Kaffee“, eQ-3 HMIP-PSM, aus, neu angelegt am " in fehler
     assert "kaffeevollautomat" not in fehler  # Konrads eigene Schalter sind kein Licht
     assert "--licht <entity_id>" in fehler
 
@@ -1519,6 +1519,7 @@ async def test_licht_wird_gesucht(
         code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht")
     assert code == 0, fehler
     assert "neu angelegte Geräte stehen oben" in ausgabe
+    assert f"✓ Licht gesucht: {ZWISCHENSCHALTER} („Zwischenschalter Kaffee“, eQ-3 HmIP-FSM, aus, neu angelegt am " in ausgabe
     assert f"✓ Das Licht an der Maschine ist jetzt {ZWISCHENSCHALTER} (vorher {LICHT})." in ausgabe
     assert f"✓ Licht an der Maschine: {ZWISCHENSCHALTER} („Zwischenschalter Kaffee“)" in ausgabe
     automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
@@ -1560,7 +1561,7 @@ async def test_verschwundenes_licht_wird_ersetzt(
     assert code == 0, fehler
     assert (
         f"✓ Das gespeicherte Licht {LICHT} gibt es nicht mehr – ersetzt durch {ZWISCHENSCHALTER} "
-        "(„Zwischenschalter Kaffee“, eQ-3 HmIP-FSM, aus, angelegt " in ausgabe
+        "(„Zwischenschalter Kaffee“, eQ-3 HmIP-FSM, aus, neu angelegt am " in ausgabe
     )
     assert f"✓ Dunkel-Sensor: {HELLIGKEIT}" in ausgabe  # die Dunkel-Einstellungen bleiben
     automationen = {automation["id"]: automation for automation in gespeicherte_automationen(home_assistant)}
@@ -1568,6 +1569,28 @@ async def test_verschwundenes_licht_wird_ersetzt(
         "id": installieren.LICHT_AUTOMATION_ID,
         **installieren.licht_config(KAFFEEMASCHINE, ZWISCHENSCHALTER, HELLIGKEIT, 20),
     }
+
+
+@pytest.mark.usefixtures("kaffeemaschine")
+async def test_licht_suche_bestaetigt_das_bisherige(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    steckdose: Callable[..., Awaitable[None]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Findet die Suche nur das gespeicherte Licht, sagt sie das – samt Modell und Anlegedatum."""
+    await steckdose()
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht", LICHT)
+    assert code == 0, fehler
+    [vorher] = [a for a in gespeicherte_automationen(home_assistant) if a["id"] == installieren.LICHT_AUTOMATION_ID]
+
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--licht")
+    assert code == 0, fehler
+    assert f"✓ Licht gesucht: {LICHT} („LED Kaffee“, eQ-3 HMIP-PSM, aus, neu angelegt am " in ausgabe
+    assert "– wie bisher." in ausgabe
+    assert "ist jetzt" not in ausgabe
+    assert [a for a in gespeicherte_automationen(home_assistant) if a["id"] == installieren.LICHT_AUTOMATION_ID] == [vorher]
 
 
 @pytest.mark.usefixtures("kaffeemaschine")
@@ -2297,6 +2320,12 @@ def test_kandidaten_licht_sortierung() -> None:
     assert [e for e, _ in installieren.kandidaten_licht(register, zustaende)] == ["light.flur"]
     del zustaende["light.flur"]
     assert [e for e, _ in installieren.kandidaten_licht(register, zustaende)] == ["switch.pumpe"]
+    # Ein frisch angelegtes Gerät wird als „neu angelegt“ beschrieben.
+    import time
+
+    entitaeten["switch.pumpe"] = {"entity_id": "switch.pumpe", "created_at": time.time() - 3600}
+    [(_, beschreibung)] = installieren.kandidaten_licht(register, zustaende)
+    assert beschreibung.startswith("„Pumpe“, aus, neu angelegt am ")
 
 
 def test_deaktivierte_helligkeitssensoren_kueche_zuerst() -> None:
