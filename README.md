@@ -141,6 +141,17 @@ legt in Home Assistant ein eigenes Dashboard an – in der Seitenleiste unter de
 Namen der Maschine (z. B. „Konrad“, Symbol Kaffeetasse) – mit allem, was sich
 über Home Connect bedienen lässt:
 
+- **Die Maschine selbst**: ganz oben eine gezeichnete Front des Vollautomaten
+  (stilisiert, kein Foto), die den Betriebszustand zeigt und sich bewegt: aus,
+  bereit (die Starttaste atmet), brüht (Kaffee läuft aus beiden Öffnungen ins
+  Glas, Dampf steigt auf, der Fortschrittsbalken läuft), fertig, Achtung
+  (Warndreieck blinkt), Störung. Während ein Getränk läuft, stehen Programm und
+  Fortschritt daneben; liegt ein Wartungshinweis an, erscheint eine rote
+  Markierung an der betroffenen Stelle (Wassertank, Bohnen, Tropfschale,
+  Bildschirm). Die Ein/Aus-Taste der Zeichnung schaltet die Maschine, ein Tipp
+  auf das Glas startet „Jetzt zubereiten“. Die Bilder stecken als SVG direkt in
+  der Dashboard-Konfiguration, es braucht keine Zusatzkarten und keine Dateien
+  auf dem Home-Assistant-Rechner ([`beispiele/bilder/`](beispiele/bilder/)).
 - **Lieblingsgetränke je Person**: drei Plätze für jede angegebene Person
   (`--plaetze` ändert die Anzahl, höchstens fünf). **Tippen** bereitet das
   gespeicherte Getränk zu – nach der Rückfrage „Steht eine Tasse unter dem
@@ -288,6 +299,7 @@ Warum die Automation (nicht) gelaufen ist, zeigt ihre **Ablaufverfolgung**
 | [`beispiele/licht_folgt_kaffeemaschine.yaml`](beispiele/licht_folgt_kaffeemaschine.yaml) | Zweite Automation (optional): Licht an der Maschine folgt der Kaffeemaschine |
 | [`beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml`](beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml) | Dieselbe zweite Automation, aber nur bei Dunkelheit (Helligkeitssensor) |
 | [`beispiele/kaffee_dashboard.yaml`](beispiele/kaffee_dashboard.yaml) | Das Dashboard für die Kaffeemaschine (`--getraenke`) |
+| [`beispiele/bilder/`](beispiele/bilder/) | Die animierte Zeichnung der Maschine je Betriebszustand (SVG) |
 | [`beispiele/kaffee_skripte.yaml`](beispiele/kaffee_skripte.yaml) | Die drei Skripte zum Dashboard: zubereiten, Lieblingsgetränk speichern und zubereiten |
 | [`installieren.py`](installieren.py) | Richtet die Automation – oder mit `--getraenke` das Dashboard – per Befehl in Home Assistant ein |
 | [`tests/`](tests/) | Automatische Tests |

@@ -6,10 +6,12 @@ dagegen laufen – mit Token und mit Benutzername/Passwort.
 """
 
 import argparse
+import base64
 import json
 import os
 import re
 import sys
+import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -2996,26 +2998,38 @@ async def test_dashboard_wird_angelegt_und_bereitet_zu(
     config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=installieren.DASHBOARD_URL)
     [ansicht] = config["views"]
     assert ansicht["type"] == "sections"
-    ueberschriften = [abschnitt["cards"][0]["heading"] for abschnitt in ansicht["sections"]]
+    # Ganz oben die Zeichnung der Maschine je Betriebszustand, mit dem Gerätenamen darin.
+    assert ansicht["sections"][0]["column_span"] == 3
+    [kopf] = ansicht["sections"][0]["cards"]
+    assert kopf["type"] == "picture-elements"
+    zeichnung = kopf["elements"][0]
+    assert zeichnung["entity"] == "sensor.kaffeevollautomat_betriebszustand"
+    svg = base64.b64decode(zeichnung["state_image"]["run"].split(",", 1)[1]).decode("utf-8")
+    assert ">Kaffeevollautomat<" in svg and ">Brüht …<" in svg
+    assert kopf["elements"][1]["entity"] == KAFFEEMASCHINE  # die Ein/Aus-Taste der Zeichnung schaltet
+    assert {e["elements"][0].get("icon") for e in kopf["elements"] if e["type"] == "conditional"} == {
+        None, "mdi:water-alert", "mdi:tray-alert"
+    }
+    ueberschriften = [abschnitt["cards"][0]["heading"] for abschnitt in ansicht["sections"][1:]]
     assert ueberschriften == ["Jens", "Nicole", "Getränk zusammenstellen", "Kaffeevollautomat", "Wartung", "Zähler"]
-    jens = ansicht["sections"][0]["cards"]
+    jens = ansicht["sections"][1]["cards"]
     assert [karte["entity"] for karte in jens[1:4]] == [JENS_1, "input_text.lieblingsgetrank_jens_2", "input_text.lieblingsgetrank_jens_3"]
     assert jens[1]["tap_action"]["perform_action"] == "script.lieblingsgetraenk_zubereiten"
     assert jens[1]["tap_action"]["data"] == {"platz": "jens_1"}
     assert jens[1]["hold_action"]["perform_action"] == "script.lieblingsgetraenk_speichern"
-    direkt = ansicht["sections"][3]["cards"]
+    direkt = ansicht["sections"][4]["cards"]
     assert direkt[1]["entity"] == KAFFEEMASCHINE
     assert {karte.get("entity") for karte in direkt} >= {AKTIV, GEWAEHLT, BOHNENMENGE, FUELLMENGE, MEHRERE_GETRAENKE,
                                                           "switch.kaffeevollautomat_kindersicherung",
                                                           "switch.kaffeevollautomat_tassenwarmer",
                                                           "sensor.kaffeevollautomat_betriebszustand",
                                                           "sensor.kaffeevollautomat_programm_fortschritt"}
-    wartung = ansicht["sections"][4]["cards"]
+    wartung = ansicht["sections"][5]["cards"]
     assert [(karte["entity"], karte["name"]) for karte in wartung[1:]] == [
         (WASSERTANK.replace("wassertank_leer", "tropfschale_voll"), "Tropfschale voll"),
         (WASSERTANK, "Wassertank leer"),
     ]
-    assert ansicht["sections"][5]["cards"][1] == {
+    assert ansicht["sections"][6]["cards"][1] == {
         "type": "tile", "entity": "sensor.kaffeevollautomat_kaffees", "name": "Kaffees", "icon": "mdi:counter", "color": "brown",
     }
     assert [badge["entity"] for badge in ansicht["badges"]] == [
@@ -3236,6 +3250,9 @@ async def test_nur_anzeigen_mit_getraenke(
     assert code == 0, fehler
     assert "Diese Skripte würden angelegt (nichts geändert):" in ausgabe
     assert '"alias": "Kaffee zubereiten"' in ausgabe
+    assert "Und dieses Dashboard (eingebettete Bilder gekürzt):" in ausgabe
+    assert '"image": "data:image/svg+xml;base64,… (' in ausgabe
+    assert not re.search(r"[A-Za-z0-9+/]{120}", ausgabe)  # keine Base64-Blöcke in der Ausgabe
     assert f'"entity": "{JENS_1}"' in ausgabe
     assert home_assistant.states.get(GETRAENK) is None
     assert home_assistant.states.get(WASSERTANK) is None
@@ -3273,3 +3290,97 @@ def test_getraenke_liste() -> None:
     # Ohne Getränkeliste gilt die bekannte Liste.
     assert len(installieren.getraenke_liste({}, AKTIV)) == len(installieren.GETRAENKE_NAMEN)
     assert installieren.getraenke_liste({}, None)[0] == ("Espresso", ESPRESSO)
+
+
+# --- Die Zeichnung der Kaffeemaschine im Kopf des Dashboards -----------------
+
+BILDER = REPO / "beispiele" / "bilder"
+
+
+@pytest.mark.parametrize("variante", list(installieren.BILD_VARIANTEN))
+def test_zeichnung_ist_gueltiges_svg(variante: str) -> None:
+    """Jede Zustandsvariante ist wohlgeformtes SVG, trägt Namen und Status und ist als Data-URI eingebettet."""
+    svg = installieren.konrad_svg(variante, "Konrad")
+    wurzel = ET.fromstring(svg)
+    assert wurzel.tag == "{http://www.w3.org/2000/svg}svg"
+    assert wurzel.get("viewBox") == "0 0 1200 500"
+    status = installieren.BILD_VARIANTEN[variante][0]
+    assert ">Konrad<" in svg and f">{status}<" in svg
+    uri = installieren.bild_uri(svg)
+    assert uri.startswith("data:image/svg+xml;base64,")
+    assert base64.b64decode(uri.split(",", 1)[1]).decode("utf-8") == svg
+    assert (BILDER / f"konrad_{variante}.svg").read_text(encoding="utf-8") == svg
+
+
+def test_zeichnung_animiert_je_zustand() -> None:
+    """Brühen zeigt Strahl, Dampf und laufenden Fortschritt; fertig die volle Tasse mit Dampf; aus bleibt still."""
+    brueht = installieren.konrad_svg("brueht")
+    assert brueht.count("stroke-dashoffset") == 2  # zwei Kaffeestrahlen
+    assert brueht.count("animateTransform") == 3  # drei Dampfschwaden
+    assert 'attributeName="height" values="0;50"' in brueht  # die Tasse füllt sich
+    fertig = installieren.konrad_svg("fertig")
+    assert "stroke-dashoffset" not in fertig and "animateTransform" in fertig
+    assert 'height="50" fill="#5d3a1a"' in fertig
+    aus = installieren.konrad_svg("aus")
+    assert "<animate" not in aus and "animateTransform" not in aus
+    assert 'attributeName="opacity" values="1;.25;1"' in installieren.konrad_svg("achtung")  # Warndreieck blinkt
+    assert 'values="1;.3;1"' in installieren.konrad_svg("bereit")  # die Starttaste atmet
+
+
+def test_kopfkarte_deckt_alle_betriebszustaende_ab() -> None:
+    beispiel = installieren.beispiel_konfigurationen()
+    ansicht = beispiel["dashboard"]["views"][0]
+    assert "header" not in ansicht
+    kopf = ansicht["sections"][0]
+    assert kopf["column_span"] == 3
+    [karte] = kopf["cards"]
+    assert karte["type"] == "picture-elements"
+    assert karte["image"] == installieren.LEERES_BILD  # nur das Seitenverhältnis, sonst leer
+    assert karte["grid_options"] == {"columns": "full", "rows": "auto"}
+    bild, einschalter, tasse, *weitere = karte["elements"]
+    assert bild["entity"] == "sensor.konrad_betriebszustand"
+    assert set(bild["state_image"]) == {
+        "inactive", "ready", "delayedstart", "aborting", "run", "pause", "finished", "actionrequired", "error"
+    }
+    for zustand, variante in installieren.ZUSTAND_BILDER.items():
+        assert bild["state_image"][zustand] == installieren.bild_uri(installieren.konrad_svg(variante, "Konrad"))
+    assert bild["image"] == bild["state_image"]["inactive"]
+    assert bild["filter"] == "none" and bild["aspect_ratio"] == "12x5"
+    assert bild["style"] == {"left": "50%", "top": "50%", "width": "100%"}
+    assert einschalter["entity"] == "switch.konrad_einschalter" and einschalter["tap_action"] == {"action": "toggle"}
+    assert einschalter["style"]["left"] == "11.7%" and einschalter["style"]["top"] == "22.4%"
+    assert tasse["tap_action"]["perform_action"] == "script.kaffee_zubereiten"
+    assert tasse["tap_action"]["confirmation"] == installieren.TASSE
+    # Programmname und Fortschritt nur, während ein Getränk läuft; Hinweise nur, wenn sie anliegen.
+    bedingte = [e for e in weitere if e["type"] == "conditional"]
+    assert len(bedingte) == len(weitere) == 2 + 4  # Programm, Fortschritt, 4 Wartungshinweise im Beispiel
+    assert bedingte[0]["conditions"] == [{"entity": "sensor.konrad_betriebszustand", "state": "run"}]
+    assert bedingte[0]["elements"][0]["entity"] == "select.konrad_aktives_programm"
+    assert bedingte[1]["elements"][0]["prefix"] == "Fortschritt "
+    wassertank = next(e for e in bedingte if e["elements"][0].get("icon") == "mdi:water-alert")
+    assert wassertank["conditions"] == [
+        {"entity": "sensor.konrad_wassertank_leer", "state_not": "off"},
+        {"entity": "sensor.konrad_wassertank_leer", "state_not": "unknown"},
+        {"entity": "sensor.konrad_wassertank_leer", "state_not": "unavailable"},
+    ]
+    assert wassertank["elements"][0]["tap_action"] == {"action": "more-info"}
+    assert {e["elements"][0]["icon"] for e in bedingte[2:]} == {
+        "mdi:water-alert", "mdi:seed-off", "mdi:tray-alert", "mdi:water-off"
+    }
+
+
+def test_ohne_betriebszustand_keine_zeichnung() -> None:
+    maschine = {"einschalter": "switch.konrad_einschalter", "aktiv": "select.konrad_aktives_programm"}
+    assert installieren.kopfkarte("Konrad", maschine, {}) is None
+    dashboard = installieren.dashboard_konfiguration("Konrad", maschine, {}, {}, {})
+    assert dashboard["views"][0]["sections"][0]["cards"][0] == {
+        "type": "heading", "heading": "Getränk zusammenstellen", "heading_style": "title", "icon": "mdi:coffee-maker"
+    }
+
+
+def test_ohne_bilder_kuerzt_nur_eingebettete_bilder() -> None:
+    uri = installieren.bild_uri("<svg/>")
+    assert installieren.ohne_bilder({"a": [uri, "data:text/plain,x", 3], "b": {"c": uri}}) == {
+        "a": [f"data:image/svg+xml;base64,… ({len(uri)} Zeichen)", "data:text/plain,x", 3],
+        "b": {"c": f"data:image/svg+xml;base64,… ({len(uri)} Zeichen)"},
+    }
