@@ -7,6 +7,7 @@ dagegen laufen – mit Token und mit Benutzername/Passwort.
 
 import argparse
 import base64
+import copy
 import json
 import os
 import re
@@ -3982,3 +3983,121 @@ async def test_dashboard_zeigen_nennt_die_leiste(
     assert "    - custom:button-card  name=System" in ausgabe.splitlines()
     assert "Navigationsleiste im Wortlaut (erste gefundene):" in ausgabe
     assert json.loads(ausgabe.split("Navigationsleiste im Wortlaut (erste gefundene):\n", 1)[1]) == leiste_aus_buttons()
+
+
+
+def jens_leiste() -> dict[str, Any]:
+    """Nachbau der Leiste aus Jens’ Haus-Dashboard: Pfeile mit JavaScript, neun Knöpfe, repeat(9, …) mit Handy-Variante."""
+    ziele = {
+        "haus": "/haus-uebersicht/uebersicht", "licht": "/haus-uebersicht/licht", "lueftung": "/haus-lueftung/vent",
+        "heizung": "/haus-heizung/raeume", "strom": "/solar-pv/pv", "garten": "/haus-garten/garten",
+        "steuern": "/haus-uebersicht/steuern", "medien": "/haus-uebersicht/medien", "system": "/haus-uebersicht/system",
+    }
+    aktiv = {"card": [{"background": "rgba(138, 180, 248, 0.16)"}], "icon": [{"color": "#8ab4f8"}]}
+    normal = {"card": [{"background": "transparent"}], "icon": [{"color": "rgba(255, 255, 255, 0.64)"}]}
+    felder: dict[str, Any] = {
+        "zurueck": {"card": {"type": "custom:button-card", "icon": "mdi:arrow-left", "name": "",
+                             "tap_action": {"action": "javascript", "javascript": "[[[ window.history.back(); ]]]"}}, "do_not_eval": True},
+        "vor": {"card": {"type": "custom:button-card", "icon": "mdi:arrow-right", "name": "",
+                         "tap_action": {"action": "javascript", "javascript": "[[[ window.history.forward(); ]]]"}}, "do_not_eval": True},
+    }
+    for name, ziel in ziele.items():
+        felder[name] = {
+            "card": {
+                "type": "custom:button-card", "name": name.capitalize(), "icon": "mdi:home", "show_name": True,
+                "tap_action": {"action": "navigate", "navigation_path": ziel},
+                "styles": copy.deepcopy(aktiv if name == "haus" else normal),
+                "extra_styles": "ha-card:active { transform: scale(0.94); }",
+            },
+            "do_not_eval": True,
+        }
+    return {
+        "type": "custom:button-card",
+        "variables": {"nav_marker": "navigationsleiste"},
+        "styles": {
+            "card": [{"padding": "6px"}],
+            "grid": [
+                {"grid-template-areas": '"zurueck vor haus licht lueftung heizung strom garten steuern medien system"'},
+                {"grid-template-columns": "52px 52px repeat(9, minmax(0, 1fr))"},
+                {"grid-template-rows": "auto"},
+                {"column-gap": "4px"},
+            ],
+            "custom_fields": {name: [{"min-width": "0"}] for name in felder},
+        },
+        "custom_fields": felder,
+        "extra_styles": "@media (max-width: 720px) { #container { grid-template-columns: 38px 38px repeat(9, minmax(0, 1fr)) !important; } }",
+        "grid_options": {"columns": "full", "rows": "auto"},
+    }
+
+
+def test_leiste_wie_bei_jens_spalten_mit_repeat_und_handy_variante() -> None:
+    """repeat(9, …) wird zu repeat(10, …), auch in der Handy-Variante; ein Schaden der früheren Fassung wird repariert."""
+    url = "/haus-uebersicht/kaffee-konrad"
+    leiste = jens_leiste()
+    vorher = copy.deepcopy(leiste)
+    assert installieren.ist_leiste(leiste)
+    assert installieren.leiste_feld_einfuegen(leiste, url, "Konrad") is True
+    assert list(leiste["custom_fields"]) == ["zurueck", "vor", "haus", "licht", "lueftung", "heizung", "strom", "garten", "steuern", "medien", "system", "konrad"]
+    konrad = leiste["custom_fields"]["konrad"]["card"]
+    assert konrad["name"] == "Konrad" and konrad["icon"] == "mdi:coffee" and konrad["tap_action"]["navigation_path"] == url
+    assert konrad["styles"] == leiste["custom_fields"]["system"]["card"]["styles"]  # wie System: nicht hervorgehoben
+    assert leiste["styles"]["grid"][0] == {"grid-template-areas": '"zurueck vor haus licht lueftung heizung strom garten steuern medien system konrad"'}
+    assert leiste["styles"]["grid"][1] == {"grid-template-columns": "52px 52px repeat(10, minmax(0, 1fr))"}
+    assert leiste["styles"]["grid"][2:] == [{"grid-template-rows": "auto"}, {"column-gap": "4px"}]
+    assert leiste["extra_styles"] == "@media (max-width: 720px) { #container { grid-template-columns: 38px 38px repeat(10, minmax(0, 1fr)) !important; } }"
+    assert leiste["styles"]["custom_fields"]["konrad"] == [{"min-width": "0"}]
+
+    # Der Schaden der früheren Fassung („… 1fr))“ angehängt) wird beim nächsten Lauf repariert.
+    leiste["styles"]["grid"][1]["grid-template-columns"] = "52px 52px repeat(9, minmax(0, 1fr)) 1fr))"
+    assert installieren.leiste_feld_einfuegen(leiste, url, "Konrad") is True
+    assert leiste["styles"]["grid"][1] == {"grid-template-columns": "52px 52px repeat(10, minmax(0, 1fr))"}
+    assert list(leiste["custom_fields"])[-1] == "konrad" and list(leiste["custom_fields"]).count("konrad") == 1
+
+    assert installieren.leiste_feld_entfernen(leiste, url) is True
+    assert leiste == vorher
+
+
+def test_hervorhebung_auf_dem_konrad_reiter() -> None:
+    """Auf dem Konrad-Reiter ist der Konrad-Knopf hervorgehoben, „Haus“ nicht mehr."""
+    url = "/haus-uebersicht/kaffee-konrad"
+    leiste = jens_leiste()
+    installieren.leiste_feld_einfuegen(leiste, url, "Konrad")
+    aktiv = copy.deepcopy(leiste["custom_fields"]["haus"]["card"]["styles"])
+    normal = copy.deepcopy(leiste["custom_fields"]["konrad"]["card"]["styles"])
+    installieren._hervorhebung_tauschen(leiste, "uebersicht", url)
+    assert leiste["custom_fields"]["konrad"]["card"]["styles"] == aktiv
+    assert leiste["custom_fields"]["haus"]["card"]["styles"] == normal
+    assert leiste["custom_fields"]["system"]["card"]["styles"] == normal
+    # Ohne passenden Knopf zur Ansicht ändert sich nichts.
+    vorher = copy.deepcopy(leiste)
+    installieren._hervorhebung_tauschen(leiste, "gibt-es-nicht", url)
+    assert leiste == vorher
+
+
+@pytest.mark.parametrize(
+    ("spalten", "mehr", "weniger"),
+    [
+        ("52px 52px repeat(9, minmax(0, 1fr))", "52px 52px repeat(10, minmax(0, 1fr))", "52px 52px repeat(8, minmax(0, 1fr))"),
+        ("repeat(4, 1fr)", "repeat(5, 1fr)", "repeat(3, 1fr)"),
+        ("1fr 2fr minmax(0, 1fr)", "1fr 2fr minmax(0, 1fr) minmax(0, 1fr)", "1fr 2fr"),
+        ("38px 38px repeat(9, minmax(0, 1fr)) !important", "38px 38px repeat(10, minmax(0, 1fr)) !important", "38px 38px repeat(8, minmax(0, 1fr)) !important"),
+        ("auto", "auto auto", "auto"),
+    ],
+)
+def test_spalten_erweitern_und_verkleinern(spalten: str, mehr: str, weniger: str) -> None:
+    assert installieren._spalten_erweitern(spalten) == mehr
+    assert installieren._spalten_verkleinern(spalten) == weniger
+
+
+def test_spalten_zaehlen_und_reparieren() -> None:
+    assert installieren._spalten_zaehlen("52px 52px repeat(9, minmax(0, 1fr))") == 11
+    assert installieren._spalten_zaehlen("1fr") == 1
+    assert installieren._css_teile("a  minmax(0, 1fr)   b") == ["a", "minmax(0, 1fr)", "b"]
+    # Spalten, die sich von selbst anpassen oder nie zu den Bereichen passten, bleiben wie sie sind.
+    for spalten in ("repeat(auto-fill, minmax(60px, 1fr))", "1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr"):
+        karte = {"styles": {"grid": [{"grid-template-areas": '"a b c"'}, {"grid-template-columns": spalten}]}}
+        installieren._raster_angleichen(karte)
+        assert karte["styles"]["grid"][1]["grid-template-columns"] == spalten
+    assert installieren._spalten_zaehlen("repeat(3, 1fr 2fr) auto !important") == 7
+    assert installieren._spalten_reparieren("52px 52px repeat(9, minmax(0, 1fr)) 1fr))") == "52px 52px repeat(9, minmax(0, 1fr))"
+    assert installieren._spalten_reparieren("1fr 1fr") == "1fr 1fr"

@@ -2177,33 +2177,148 @@ def _raster(karte: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _raster_erweitern(karte: dict[str, Any], vorlage: str, neu: str) -> None:
-    """Macht im Raster der Leiste hinter ``vorlage`` Platz für ``neu`` (Bereiche und Spalten)."""
+WIEDERHOLUNG = re.compile(r"^repeat\(\s*(\d+)\s*,(.*)\)$", re.S)  # repeat(9, minmax(0, 1fr))
+
+
+def _css_teile(text: str) -> list[str]:
+    """Zerlegt einen CSS-Wert an Leerzeichen – aber nicht innerhalb von Klammern (minmax(0, 1fr) bleibt ganz)."""
+    teile: list[str] = []
+    aktuell, tiefe = "", 0
+    for zeichen in text:
+        if zeichen == "(":
+            tiefe += 1
+        elif zeichen == ")":
+            tiefe = max(0, tiefe - 1)
+        if zeichen.isspace() and tiefe == 0:
+            if aktuell:
+                teile.append(aktuell)
+            aktuell = ""
+        else:
+            aktuell += zeichen
+    if aktuell:
+        teile.append(aktuell)
+    return teile
+
+
+def _spalten_zaehlen(spalten: str) -> int:
+    anzahl = 0
+    for teil in _css_teile(spalten):
+        if teil.startswith("!"):
+            continue
+        treffer = WIEDERHOLUNG.match(teil)
+        anzahl += int(treffer.group(1)) * max(1, len(_css_teile(treffer.group(2)))) if treffer else 1
+    return anzahl
+
+
+def _spalten_reparieren(spalten: str) -> str:
+    """Nimmt angehängte Reste weg, die die Klammern aus dem Gleichgewicht bringen (Schaden einer früheren Fassung)."""
+    teile = spalten.split()
+    while len(teile) > 1 and " ".join(teile).count(")") > " ".join(teile).count("("):
+        teile.pop()
+    return " ".join(teile)
+
+
+def _spalten_erweitern(spalten: str) -> str:
+    """Eine Spalte mehr: die letzte repeat(n, …)-Gruppe zählt hoch, sonst wird die letzte Spalte wiederholt."""
+    teile = _css_teile(spalten)
+    wichtig = [t for t in teile if t.startswith("!")]
+    teile = [t for t in teile if not t.startswith("!")]
+    for i in range(len(teile) - 1, -1, -1):
+        treffer = WIEDERHOLUNG.match(teile[i])
+        if treffer:
+            teile[i] = f"repeat({int(treffer.group(1)) + 1},{treffer.group(2)})"
+            break
+    else:
+        if teile:
+            teile.append(teile[-1])
+    return " ".join(teile + wichtig)
+
+
+def _spalten_verkleinern(spalten: str) -> str:
+    teile = _css_teile(spalten)
+    wichtig = [t for t in teile if t.startswith("!")]
+    teile = [t for t in teile if not t.startswith("!")]
+    for i in range(len(teile) - 1, -1, -1):
+        treffer = WIEDERHOLUNG.match(teile[i])
+        if treffer and int(treffer.group(1)) > 1:
+            teile[i] = f"repeat({int(treffer.group(1)) - 1},{treffer.group(2)})"
+            break
+    else:
+        if len(teile) > 1:
+            teile.pop()
+    return " ".join(teile + wichtig)
+
+
+def _bereiche_zaehlen(bereiche: str) -> int:
+    zeilen = re.findall(r'"([^"]*)"', bereiche) or [bereiche]
+    return len(zeilen[0].split())
+
+
+def _bereiche_erweitern(karte: dict[str, Any], vorlage: str, neu: str) -> None:
     for eintrag in _raster(karte):
         bereiche = eintrag.get("grid-template-areas")
         if isinstance(bereiche, str):
             eintrag["grid-template-areas"] = re.sub(rf"\b{re.escape(vorlage)}\b", f"{vorlage} {neu}", bereiche)
-        spalten = eintrag.get("grid-template-columns")
-        if isinstance(spalten, str):
-            treffer = re.fullmatch(r"\s*repeat\(\s*(\d+)\s*,(.*)\)\s*", spalten)
-            if treffer:
-                eintrag["grid-template-columns"] = f"repeat({int(treffer.group(1)) + 1},{treffer.group(2)})"
-            elif len(spalten.split()) > 1:
-                eintrag["grid-template-columns"] = spalten + " " + spalten.split()[-1]
 
 
-def _raster_verkleinern(karte: dict[str, Any], name: str) -> None:
+def _bereiche_verkleinern(karte: dict[str, Any], name: str) -> None:
     for eintrag in _raster(karte):
         bereiche = eintrag.get("grid-template-areas")
         if isinstance(bereiche, str):
             eintrag["grid-template-areas"] = re.sub(rf"\s*\b{re.escape(name)}\b", "", bereiche)
+
+
+def _raster_angleichen(karte: dict[str, Any]) -> None:
+    """Bringt die Spaltenangabe der Leiste auf die Zahl der Bereiche – in styles.grid und in extra_styles.
+
+    Repariert dabei Spaltenangaben, die eine frühere Fassung beschädigt hat.
+    """
+    soll = None
+    for eintrag in _raster(karte):
+        bereiche = eintrag.get("grid-template-areas")
+        if isinstance(bereiche, str):
+            soll = _bereiche_zaehlen(bereiche)
+    if not soll:
+        return
+
+    def angleichen(spalten: str) -> str:
+        spalten = _spalten_reparieren(spalten)
+        if "auto-fill" in spalten or "auto-fit" in spalten:  # passt sich von selbst an
+            return spalten
+        ist = _spalten_zaehlen(spalten)
+        if ist == soll - 1:  # ein Knopf ist dazugekommen
+            return _spalten_erweitern(spalten)
+        if ist == soll + 1 and ist > 1:  # ein Knopf ist weggefallen
+            return _spalten_verkleinern(spalten)
+        return spalten  # passt schon – oder war nie auf die Bereiche abgestimmt, dann bleibt es so
+
+    for eintrag in _raster(karte):
         spalten = eintrag.get("grid-template-columns")
         if isinstance(spalten, str):
-            treffer = re.fullmatch(r"\s*repeat\(\s*(\d+)\s*,(.*)\)\s*", spalten)
-            if treffer and int(treffer.group(1)) > 1:
-                eintrag["grid-template-columns"] = f"repeat({int(treffer.group(1)) - 1},{treffer.group(2)})"
-            elif len(spalten.split()) > 1:
-                eintrag["grid-template-columns"] = " ".join(spalten.split()[:-1])
+            eintrag["grid-template-columns"] = angleichen(spalten)
+    extra = karte.get("extra_styles")
+    if isinstance(extra, str):
+        karte["extra_styles"] = re.sub(
+            r"(grid-template-columns\s*:\s*)([^;}]+)", lambda m: m.group(1) + angleichen(m.group(2).strip()), extra
+        )
+
+
+def _hervorhebung_tauschen(leiste: dict[str, Any], pfad: Optional[str], url: str) -> None:
+    """Auf dem Konrad-Reiter soll der Konrad-Knopf hervorgehoben sein, nicht der Knopf der kopierten Ansicht."""
+    felder = leiste.get("custom_fields")
+    if not isinstance(felder, dict) or not pfad:
+        return
+    knoepfe = {name: kind for name, feld in felder.items() if (kind := _feldkarte(feld)) is not None}
+    aktiv = [n for n, k in knoepfe.items() if (ziel := _navigiert(k)) and ziel.rstrip("/").split("/")[-1] == pfad]
+    neu = [n for n, k in knoepfe.items() if _navigiert(k) == url]
+    if len(aktiv) != 1 or len(neu) != 1 or aktiv == neu:
+        return
+    a, b = knoepfe[aktiv[0]], knoepfe[neu[0]]
+    a_styles, b_styles = a.pop("styles", None), b.pop("styles", None)
+    if b_styles is not None:
+        a["styles"] = b_styles
+    if a_styles is not None:
+        b["styles"] = a_styles
 
 
 def leiste_feld_einfuegen(karte: dict[str, Any], url: str, label: str) -> bool:
@@ -2212,15 +2327,18 @@ def leiste_feld_einfuegen(karte: dict[str, Any], url: str, label: str) -> bool:
     felder = karte.get("custom_fields")
     if not isinstance(felder, dict):
         return False
-    vorlage = None
+    vorlage, vorhanden = None, False
     for name, feld in felder.items():
         kind = _feldkarte(feld)
         if kind is None:
             continue
         if _navigiert(kind) == url:
-            return True
-        if kind.get("type") == BUTTON_CARD and _navigiert(kind):
+            vorhanden = True
+        elif kind.get("type") == BUTTON_CARD and _navigiert(kind):
             vorlage = name
+    if vorhanden:
+        _raster_angleichen(karte)  # schon drin – höchstens die Spalten einer früheren Fassung geraderücken
+        return True
     if vorlage is None:
         return False
     neu_name = slug(label) or "kaffee"
@@ -2236,7 +2354,8 @@ def leiste_feld_einfuegen(karte: dict[str, Any], url: str, label: str) -> bool:
     styles = karte.get("styles")
     if isinstance(styles, dict) and isinstance(styles.get("custom_fields"), dict) and vorlage in styles["custom_fields"]:
         styles["custom_fields"][neu_name] = copy.deepcopy(styles["custom_fields"][vorlage])
-    _raster_erweitern(karte, vorlage, neu_name)
+    _bereiche_erweitern(karte, vorlage, neu_name)
+    _raster_angleichen(karte)
     return True
 
 
@@ -2252,28 +2371,30 @@ def leiste_feld_entfernen(karte: dict[str, Any], url: str) -> bool:
         styles = karte.get("styles")
         if isinstance(styles, dict) and isinstance(styles.get("custom_fields"), dict):
             styles["custom_fields"].pop(name, None)
-        _raster_verkleinern(karte, name)
+        _bereiche_verkleinern(karte, name)
+        _raster_angleichen(karte)
         return True
     return False
 
 
-def navbar_kopie(config: dict[str, Any], ansichten: list[dict[str, Any]]) -> Optional[tuple[dict[str, Any], str]]:
-    """Die Karte, die die Leiste auf den Konrad-Reiter bringt, und wo sie hingehört („badges“ oder „cards“):
-    die erste Navbar-Karte oder Button-Card-Leiste einer Ansicht – oder, wenn die Leiste nur in einer
-    Decluttering-Vorlage steckt, die erste Karte, die diese Vorlage einsetzt."""
-    karten = navbar_karten(ansichten) + leisten_karten(ansichten)
-    if karten:
-        original = karten[0]
-        in_badges = any(
-            isinstance(a.get("badges"), list) and any(b is original for b in a["badges"]) for a in ansichten
-        )
-        return copy.deepcopy(original), "badges" if in_badges else "cards"
+def navbar_kopie(
+    config: dict[str, Any], ansichten: list[dict[str, Any]]
+) -> Optional[tuple[dict[str, Any], str, Optional[str]]]:
+    """Die Karte, die die Leiste auf den Konrad-Reiter bringt, wo sie hingehört („badges“ oder „cards“) und
+    der Pfad der Ansicht, aus der sie stammt: die erste Navbar-Karte oder Button-Card-Leiste einer Ansicht –
+    oder, wenn die Leiste nur in einer Decluttering-Vorlage steckt, die erste Karte, die diese Vorlage einsetzt."""
+    for ansicht in ansichten:
+        karten = navbar_karten(ansicht) + leisten_karten(ansicht)
+        if karten:
+            original = karten[0]
+            in_badges = isinstance(ansicht.get("badges"), list) and any(b is original for b in ansicht["badges"])
+            return copy.deepcopy(original), ("badges" if in_badges else "cards"), ansicht.get("path")
     vorlagen = config.get("decluttering_templates")
     if isinstance(vorlagen, dict):
         mit_leiste = {name for name, inhalt in vorlagen.items() if navbar_karten(inhalt) or leisten_karten(inhalt)}
         for karte in _karten(ansichten):
             if karte.get("type") == DECLUTTERING and karte.get("template") in mit_leiste:
-                return copy.deepcopy(karte), "cards"
+                return copy.deepcopy(karte), "cards", None
     return None
 
 
@@ -2351,11 +2472,14 @@ def reiter_einfuegen(ws: "WebSocket", url_path: str, ansicht: dict[str, Any]) ->
             f"Im Dashboard „{url_path}“ gibt es schon einen Reiter mit dem Pfad „{REITER_PFAD}“, der nicht vom "
             "Skript stammt – bitte dort umbenennen."
         )
-    mit_navbar = navbar_route_einfuegen(config, fremde, f"/{url_path}/{REITER_PFAD}", str(ansicht.get("title") or "Kaffee"))
+    url = f"/{url_path}/{REITER_PFAD}"
+    mit_navbar = navbar_route_einfuegen(config, fremde, url, str(ansicht.get("title") or "Kaffee"))
     reiter = {**ansicht, "path": REITER_PFAD, REITER_KENNZEICHEN: True}
     kopie = navbar_kopie(config, fremde) if mit_navbar else None
     if kopie:
-        leiste, ort = kopie
+        leiste, ort, pfad = kopie
+        if ist_leiste(leiste):
+            _hervorhebung_tauschen(leiste, pfad, url)
         if ort == "badges":  # die Leiste liegt bei den Badges der Ansicht (so sitzt sie fest am Rand)
             reiter["badges"] = list(ansicht.get("badges") or []) + [leiste]
         else:
