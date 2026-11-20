@@ -1721,7 +1721,8 @@ WEITERE_DASHBOARDS = "weitere_dashboards"  # Schlüssel im Konrad-Dashboard: wo 
 STANDARD_DASHBOARD = "lovelace"  # so heißt das Standard-Dashboard „Übersicht“ in der API
 AUCH_AUTO = "auto"  # --auch-in ohne Wert: Dashboards zur Auswahl anbieten
 AUCH_AUS = "aus"  # --auch-in aus: Reiter wieder entfernen
-NAVBAR = "custom:navbar-card"  # Navigationsleiste aus HACS – dort kommt Konrad als Punkt hinein
+NAVBAR = "navbar"  # Teil des Kartentyps einer Navigationsleiste (custom:navbar-card u. ä.) – dort kommt Konrad hinein
+DECLUTTERING = "custom:decluttering-card"  # Karte, die eine Vorlage aus decluttering_templates einsetzt
 SKRIPT_ZUBEREITEN = "kaffee_zubereiten"
 SKRIPT_SPEICHERN = "lieblingsgetraenk_speichern"
 SKRIPT_LIEBLING = "lieblingsgetraenk_zubereiten"
@@ -2024,20 +2025,49 @@ def _dashboard_konfiguration_lesen(ws: "WebSocket", url_path: str) -> dict[str, 
 
 
 def _karten(objekt: Any) -> Iterator[dict[str, Any]]:
-    """Alle Karten eines Dashboards, auch verschachtelte (Abschnitte, Stapel, bedingte Karten)."""
+    """Alles mit einem ``type`` in einem Dashboard – Karten, auch beliebig tief verschachtelt (Stapel,
+    Abschnitte, Reiter, bedingte Karten, Vorlagen im Stamm)."""
     if isinstance(objekt, dict):
         if isinstance(objekt.get("type"), str):
             yield objekt
-        for schluessel in ("views", "sections", "cards", "card"):
-            if schluessel in objekt:
-                yield from _karten(objekt[schluessel])
+        for wert in objekt.values():
+            yield from _karten(wert)
     elif isinstance(objekt, list):
         for eintrag in objekt:
             yield from _karten(eintrag)
 
 
-def navbar_karten(ansichten: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [karte for karte in _karten(ansichten) if karte.get("type") == NAVBAR]
+def ist_navbar(karte: dict[str, Any]) -> bool:
+    return NAVBAR in str(karte.get("type", "")).lower()
+
+
+def navbar_karten(objekt: Any) -> list[dict[str, Any]]:
+    return [karte for karte in _karten(objekt) if ist_navbar(karte)]
+
+
+def kartentypen(objekt: Any) -> list[str]:
+    """Die Kartentypen, die in einem Dashboard vorkommen – zum Durchleuchten, wenn keine Navbar gefunden wird."""
+    return sorted({str(karte["type"]) for karte in _karten(objekt)})
+
+
+def stamm_von(config: dict[str, Any]) -> dict[str, Any]:
+    """Der Dashboard-Stamm ohne die Ansichten: Vorlagen (decluttering_templates, navbar-card …) und Einstellungen."""
+    return {k: v for k, v in config.items() if k != "views"}
+
+
+def navbar_vorlagen_routen(config: dict[str, Any]) -> list[list[Any]]:
+    """Die Routenlisten aller Vorlagen unter ``navbar-card.templates`` im Dashboard-Stamm."""
+    einstellungen = config.get("navbar-card")
+    vorlagen = einstellungen.get("templates") if isinstance(einstellungen, dict) else None
+    if not isinstance(vorlagen, dict):
+        return []
+    listen = []
+    for eintrag in vorlagen.values():
+        if isinstance(eintrag, dict):
+            routen = eintrag.setdefault("routes", [])
+            if isinstance(routen, list):
+                listen.append(routen)
+    return listen
 
 
 def navbar_routen(config: dict[str, Any], karte: dict[str, Any]) -> Optional[list[Any]]:
@@ -2067,31 +2097,104 @@ def _hat_url(routen: list[Any], url: str) -> bool:
     return False
 
 
-def navbar_route_einfuegen(config: dict[str, Any], ansichten: list[dict[str, Any]], url: str, label: str) -> bool:
-    """Hängt Konrad an jede zuständige Routenliste der Navbar-Karten an; True, wenn es eine Navbar gibt."""
-    karten = navbar_karten(ansichten)
-    gesehen: list[int] = []  # eine Vorlage gilt für viele Karten – nur einmal ergänzen
-    for karte in karten:
+def _routenlisten(config: dict[str, Any], ansichten: list[dict[str, Any]]) -> list[list[Any]]:
+    """Alle Routenlisten, in die Konrad gehört: Navbar-Karten in den Ansichten und im Stamm (Vorlagen),
+    dazu die Vorlagen unter navbar-card.templates – jede Liste nur einmal."""
+    listen: list[list[Any]] = []
+    for karte in navbar_karten(ansichten) + navbar_karten(stamm_von(config)):
         routen = navbar_routen(config, karte)
-        if routen is None or id(routen) in gesehen:
-            continue
-        gesehen.append(id(routen))
+        if routen is not None and not any(routen is l for l in listen):
+            listen.append(routen)
+    for routen in navbar_vorlagen_routen(config):
+        if not any(routen is l for l in listen):
+            listen.append(routen)
+    return listen
+
+
+def navbar_route_einfuegen(config: dict[str, Any], ansichten: list[dict[str, Any]], url: str, label: str) -> bool:
+    """Hängt Konrad an jede zuständige Routenliste an; True, wenn es eine Navigationsleiste gibt."""
+    listen = _routenlisten(config, ansichten)
+    for routen in listen:
         if not _hat_url(routen, url):
             routen.append({"url": url, "icon": "mdi:coffee", "label": label})
-    return bool(karten)
+    return bool(listen) or bool(navbar_karten(ansichten))
 
 
 def navbar_route_entfernen(config: dict[str, Any], ansichten: list[dict[str, Any]], url: str) -> bool:
     entfernt = False
-    for karte in navbar_karten(ansichten):
-        routen = navbar_routen(config, karte)
-        if routen is None:
-            continue
+    for routen in _routenlisten(config, ansichten):
         rest = [r for r in routen if not (isinstance(r, dict) and r.get("url") == url)]
         if len(rest) != len(routen):
             routen[:] = rest
             entfernt = True
     return entfernt
+
+
+def navbar_kopie(config: dict[str, Any], ansichten: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Die Karte, die die Leiste auf den Konrad-Reiter bringt: die erste Navbar-Karte einer Ansicht –
+    oder, wenn die Leiste nur in einer Decluttering-Vorlage steckt, die erste Karte, die diese Vorlage einsetzt."""
+    karten = navbar_karten(ansichten)
+    if karten:
+        return copy.deepcopy(karten[0])
+    vorlagen = config.get("decluttering_templates")
+    if isinstance(vorlagen, dict):
+        mit_leiste = {name for name, inhalt in vorlagen.items() if navbar_karten(inhalt)}
+        for karte in _karten(ansichten):
+            if karte.get("type") == DECLUTTERING and karte.get("template") in mit_leiste:
+                return copy.deepcopy(karte)
+    return None
+
+
+def dashboard_baum(config: dict[str, Any], url_path: str) -> str:
+    """Der Aufbau eines Dashboards zum Nachlesen: Stamm, Ansichten und alle Karten mit Typ, verschachtelt."""
+
+    def kurz(wert: Any, laenge: int = 90) -> str:
+        text = json.dumps(ohne_bilder(wert), ensure_ascii=False)
+        return text if len(text) <= laenge else text[: laenge - 1] + "…"
+
+    def beschreibung(karte: dict[str, Any]) -> str:
+        teile = [str(karte["type"])]
+        for schluessel in ("title", "name", "heading", "template", "path", "entity"):
+            if isinstance(karte.get(schluessel), str):
+                teile.append(f"{schluessel}={karte[schluessel]}")
+        routen = karte.get("routes")
+        if isinstance(routen, list):
+            teile.append(
+                f"{len(routen)} Routen: "
+                + ", ".join(
+                    str(r.get("label") or r.get("url") or r.get("icon") or "?") for r in routen if isinstance(r, dict)
+                )
+            )
+        return "  ".join(teile)
+
+    def zweige(objekt: Any, tiefe: int) -> list[str]:
+        zeilen: list[str] = []
+        if isinstance(objekt, dict):
+            eigene = isinstance(objekt.get("type"), str)
+            if eigene:
+                zeilen.append("  " * tiefe + "- " + beschreibung(objekt))
+            for schluessel, wert in objekt.items():
+                if schluessel in ("views",):
+                    continue
+                zeilen.extend(zweige(wert, tiefe + 1 if eigene else tiefe))
+        elif isinstance(objekt, list):
+            for eintrag in objekt:
+                zeilen.extend(zweige(eintrag, tiefe))
+        return zeilen
+
+    zeilen = [f"Dashboard „{url_path}“"]
+    stamm = stamm_von(config)
+    zeilen.append("Stamm: " + (", ".join(f"{k}={kurz(v)}" for k, v in stamm.items()) if stamm else "–"))
+    zeilen.extend(zweige(stamm, 1))
+    for nummer, ansicht in enumerate(config.get("views") or [], 1):
+        if not isinstance(ansicht, dict):
+            continue
+        zeilen.append(
+            f"Ansicht {nummer}: „{ansicht.get('title', '')}“ (Pfad {ansicht.get('path', '–')}, Typ {ansicht.get('type', 'masonry')})"
+            + (" – vom Skript" if ansicht.get(REITER_KENNZEICHEN) else "")
+        )
+        zeilen.extend(zweige({k: v for k, v in ansicht.items() if k != "type"}, 1))
+    return "\n".join(zeilen)
 
 
 def reiter_einfuegen(ws: "WebSocket", url_path: str, ansicht: dict[str, Any]) -> str:
@@ -2111,12 +2214,22 @@ def reiter_einfuegen(ws: "WebSocket", url_path: str, ansicht: dict[str, Any]) ->
         )
     mit_navbar = navbar_route_einfuegen(config, fremde, f"/{url_path}/{REITER_PFAD}", str(ansicht.get("title") or "Kaffee"))
     reiter = {**ansicht, "path": REITER_PFAD, REITER_KENNZEICHEN: True}
-    if mit_navbar:
-        leiste = copy.deepcopy(navbar_karten(fremde)[0])
+    leiste = navbar_kopie(config, fremde) if mit_navbar else None
+    if leiste:
         reiter["sections"] = list(ansicht.get("sections") or []) + [{"type": "grid", "cards": [leiste]}]
     config["views"] = fremde + [reiter]
     ws.befehl(type="lovelace/config/save", url_path=None if url_path == STANDARD_DASHBOARD else url_path, config=config)
-    return ("aktualisiert" if eigene else "angelegt") + (", auch in der Navigationsleiste" if mit_navbar else "")
+    ergebnis = "aktualisiert" if eigene else "angelegt"
+    if mit_navbar:
+        return ergebnis + ", auch in der Navigationsleiste"
+    typen = kartentypen(fremde)
+    return (
+        ergebnis
+        + f"\n  ⚠ Keine Navigationsleiste in „{url_path}“ gefunden – Karten: "
+        + (", ".join(typen[:15]) + (" …" if len(typen) > 15 else "") if typen else "keine")
+        + "; im Stamm: "
+        + (", ".join(stamm_von(config)) or "–")
+    )
 
 
 def reiter_entfernen(ws: "WebSocket", url_path: str) -> bool:
@@ -3686,6 +3799,14 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dashboard-zeigen",
+        metavar="DASHBOARD",
+        help=(
+            "Nur den Aufbau eines Dashboards ausgeben (Ansichten und alle Karten mit Typ) – zur Fehlersuche, "
+            "wenn die Kaffeemaschine nicht in der Navigationsleiste erscheint"
+        ),
+    )
+    parser.add_argument(
         "--nur-anzeigen",
         action="store_true",
         help="Nur zeigen, was eingerichtet würde – nichts ändern",
@@ -3892,6 +4013,13 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
         return 0
     if args.pruefen:
         print(pruefung(ha, zustaende))
+        return 0
+    if args.dashboard_zeigen:
+        ws = WebSocket(ha.url, ha.token)
+        try:
+            print(dashboard_baum(_dashboard_konfiguration_lesen(ws, args.dashboard_zeigen.strip("/")), args.dashboard_zeigen))
+        finally:
+            ws.schliessen()
         return 0
 
     # Eine vorhandene Automation gibt die Einstellungen vor – ein zweiter Aufruf

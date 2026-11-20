@@ -3709,3 +3709,144 @@ def test_navbar_route_einfuegen_und_entfernen() -> None:
     fremd = [{"title": "A", "cards": [{"type": "custom:navbar-card", "template": "fehlt"}]}]
     assert installieren.navbar_route_einfuegen({}, fremd, url, "Konrad") is True
     assert fremd[0]["cards"][0] == {"type": "custom:navbar-card", "template": "fehlt"}
+
+
+
+async def test_navbar_in_huellkarten_und_vorlagen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Die Leiste wird auch in Reiterkarten, in decluttering_templates und unter anderem Namen gefunden."""
+    im_reiter = {"type": "custom:tabbed-card", "tabs": [{"attributes": {"label": "A"}, "card": navbar(routes=routen("uebersicht"))}]}
+    uebersicht = {"title": "Übersicht", "path": "uebersicht", "cards": [im_reiter]}
+    licht = {"title": "Licht", "path": "licht", "cards": [{"type": "custom:decluttering-card", "template": "leiste"}]}
+    vorlagen = {"decluttering_templates": {"leiste": {"card": {"type": "custom:navbar", "routes": routen("licht")}}}}
+    await haus_anlegen(hass_ws_client, home_assistant, {**vorlagen, "views": [uebersicht, licht]})
+
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", HAUS
+    )
+    assert code == 0, fehler
+    assert "angelegt, auch in der Navigationsleiste" in ausgabe
+    config = await haus_config(hass_ws_client, home_assistant)
+    assert config["views"][0]["cards"][0]["tabs"][0]["card"]["routes"] == routen("uebersicht") + [KONRAD_ROUTE]
+    assert config["decluttering_templates"]["leiste"]["card"]["routes"] == routen("licht") + [KONRAD_ROUTE]
+    assert config["views"][1] == licht  # die Decluttering-Karte selbst bleibt, wie sie ist
+    leiste = config["views"][2]["sections"][-1]["cards"][0]
+    assert leiste["type"] == "custom:navbar-card" and leiste["routes"][-1] == KONRAD_ROUTE  # Kopie der ersten Karte
+
+    code, _, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", "aus"
+    )
+    assert code == 0, fehler
+    config = await haus_config(hass_ws_client, home_assistant)
+    assert config["views"] == [uebersicht, licht]
+    assert config["decluttering_templates"] == vorlagen["decluttering_templates"]
+
+
+async def test_navbar_nur_in_decluttering_vorlage(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Steckt die Leiste nur in einer Decluttering-Vorlage, bekommt der Konrad-Reiter die Karte, die sie einsetzt."""
+    nutzer = {"type": "custom:decluttering-card", "template": "leiste", "variables": [{"farbe": "blau"}]}
+    ansichten = [{"title": "Übersicht", "path": "uebersicht", "cards": [{"type": "markdown", "content": "Haus"}, nutzer]}]
+    vorlagen = {"decluttering_templates": {"leiste": {"card": navbar(routes=routen("uebersicht"))}}}
+    await haus_anlegen(hass_ws_client, home_assistant, {**vorlagen, "views": ansichten})
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", HAUS
+    )
+    assert code == 0, fehler
+    assert "auch in der Navigationsleiste" in ausgabe
+    config = await haus_config(hass_ws_client, home_assistant)
+    assert config["decluttering_templates"]["leiste"]["card"]["routes"] == routen("uebersicht") + [KONRAD_ROUTE]
+    assert config["views"][1]["sections"][-1]["cards"] == [nutzer]
+
+
+async def test_navbar_vorlage_ohne_karte(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Vorlagen unter navbar-card.templates bekommen Konrad auch dann, wenn keine Ansicht eine Karte zeigt."""
+    ansichten = [{"title": "Übersicht", "path": "uebersicht", "cards": [{"type": "markdown", "content": "Haus"}]}]
+    vorlage = {"navbar-card": {"templates": {"haupt": {"routes": routen("uebersicht")}}}}
+    await haus_anlegen(hass_ws_client, home_assistant, {**vorlage, "views": ansichten})
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", HAUS
+    )
+    assert code == 0, fehler
+    assert "auch in der Navigationsleiste" in ausgabe
+    config = await haus_config(hass_ws_client, home_assistant)
+    assert config["navbar-card"]["templates"]["haupt"]["routes"] == routen("uebersicht") + [KONRAD_ROUTE]
+    assert "sections" in config["views"][1] and config["views"][1]["sections"][-1]["cards"][0]["type"] != "custom:navbar-card"
+
+
+async def test_ohne_navbar_nennt_das_skript_die_karten(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ansichten = [
+        {"title": "Übersicht", "path": "uebersicht", "cards": [
+            {"type": "markdown", "content": "Haus"},
+            {"type": "vertical-stack", "cards": [{"type": "custom:button-card", "name": "Licht"}, {"type": "tile", "entity": KAFFEEMASCHINE}]},
+        ]}
+    ]
+    await haus_anlegen(hass_ws_client, home_assistant, {"button_card_templates": {"x": {}}, "views": ansichten})
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", HAUS
+    )
+    assert code == 0, fehler
+    assert f"✓ Reiter „Kaffeevollautomat“ im Dashboard „{HAUS}“ angelegt\n" in ausgabe
+    assert (
+        f"  ⚠ Keine Navigationsleiste in „{HAUS}“ gefunden – Karten: custom:button-card, markdown, tile, "
+        "vertical-stack; im Stamm: button_card_templates" in ausgabe
+    )
+
+
+async def test_dashboard_zeigen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--dashboard-zeigen druckt den Aufbau eines Dashboards mit allen Karten, ohne etwas zu ändern."""
+    ansichten = [
+        {"title": "Übersicht", "path": "uebersicht", "cards": [
+            {"type": "vertical-stack", "cards": [{"type": "markdown", "content": "Haus"}, navbar(routes=routen("uebersicht", "licht"))]},
+        ]},
+        {"title": "Licht", "path": "licht", "type": "sections", "sections": [{"type": "grid", "cards": [{"type": "tile", "entity": KAFFEEMASCHINE}]}]},
+    ]
+    await haus_anlegen(hass_ws_client, home_assistant, {"navbar-card": {"templates": {"haupt": {"routes": routen("licht")}}}, "views": ansichten})
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--dashboard-zeigen", HAUS)
+    assert code == 0, fehler
+    zeilen = ausgabe.splitlines()
+    assert f"Dashboard „{HAUS}“" in zeilen
+    assert any(z.startswith("Stamm: navbar-card=") for z in zeilen)
+    assert "Ansicht 1: „Übersicht“ (Pfad uebersicht, Typ masonry)" in zeilen
+    assert "  - vertical-stack" in zeilen
+    assert "    - markdown" in zeilen
+    assert "    - custom:navbar-card  3 Routen: mdi:arrow-left, Uebersicht, Licht" in zeilen
+    assert "Ansicht 2: „Licht“ (Pfad licht, Typ sections)" in zeilen
+    assert "  - grid" in zeilen and f"    - tile  entity={KAFFEEMASCHINE}" in zeilen
+    assert home_assistant.states.get(GETRAENK) is None  # nichts eingerichtet
+
+    code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--dashboard-zeigen", "garten")
+    assert code == 1 and "automatisch erzeugt" in fehler

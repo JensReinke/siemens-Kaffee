@@ -104,6 +104,7 @@ genau einen Ersatz, übernimmt das Skript ihn von selbst. Nützliche Optionen
 | `--dunkel-unter 20` | Bis zu welcher Helligkeit es „dunkel“ ist (Standard 20 lx). Darüber bleibt das Licht aus bzw. geht aus, sobald es hell wird. |
 | `--getraenke --personen Jens,Nicole` | Richtet statt der Automation das [Dashboard für die Kaffeemaschine](#dashboard-für-die-kaffeemaschine) ein: Getränke wählen und anpassen, Lieblingsgetränke je Person, Bedienung, Wartung, Zähler. `--plaetze 5` gibt jeder Person fünf statt drei Plätze. |
 | `--auch-in haus,wand-wohnzimmer` | Legt die Kaffeemaschine zusätzlich als Reiter in andere Dashboards (der Pfad aus der Adresszeile, `lovelace` ist die Übersicht), z. B. für Wandtablets oder das iPad. Ohne Wert zur Auswahl. Die Wahl merkt sich das Skript, `--auch-in aus` entfernt die Reiter wieder. |
+| `--dashboard-zeigen haus-uebersicht` | Gibt nur den Aufbau eines Dashboards aus (Ansichten und alle Karten mit Typ), zur Fehlersuche, wenn die Kaffeemaschine nicht in der Navigationsleiste erscheint. |
 | `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
 
 Das Skript legt die Automation ohne Blueprint an (wie in
@@ -197,7 +198,9 @@ python3 installieren.py --getraenke --personen Jens,Nicole --auch-in
 zeigt die vorhandenen Dashboards zur Auswahl (mehrere möglich), merkt sich die
 Wahl und erneuert die Reiter bei jedem weiteren Lauf mit. Hat ein Dashboard eine
 Navigationsleiste aus HACS (Navbar Card), kommt die Kaffeemaschine auch dort als
-Punkt hinein, und der neue Reiter bekommt dieselbe Leiste. Die Übersicht lässt
+Punkt hinein, und der neue Reiter bekommt dieselbe Leiste; findet das Skript
+keine, nennt es die Karten, die es gesehen hat, und `--dashboard-zeigen` zeigt
+den ganzen Aufbau. Die Übersicht lässt
 sich erst ergänzen, wenn sie nicht mehr automatisch erzeugt wird (Stift →
 „Steuerung übernehmen“). Zeigt ein Zähler wie „Heißwasser“ eine Einheit wie
 fl. oz., lässt sich das in den Einstellungen der Entität auf ml umstellen.
