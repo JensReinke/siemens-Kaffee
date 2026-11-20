@@ -2253,6 +2253,388 @@ def skript_konfigurationen(
     return {SKRIPT_ZUBEREITEN: zubereiten, SKRIPT_SPEICHERN: speichern, SKRIPT_LIEBLING: liebling}
 
 
+# ---------------------------------------------------------------------------
+# Die Zeichnung der Kaffeemaschine für den Kopf des Dashboards
+# ---------------------------------------------------------------------------
+
+BILD_BREITE, BILD_HOEHE = 1200, 500  # Seitenverhältnis 12:5
+SCHRIFT = "-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+FUELLDAUER = "22s"  # so lange „braucht“ die gezeichnete Tasse, bis sie voll ist (Schleife)
+BILD_VARIANTEN = {  # Variante → (Statuszeile, Untertitel, Farbe der Statuszeile)
+    "aus": ("Aus", "Zum Einschalten auf die Taste tippen", "#9e9e9e"),
+    "bereit": ("Bereit", "Tasse hinstellen und Getränk wählen", "#43a047"),
+    "brueht": ("Brüht …", "Der Kaffee läuft", "#fb8c00"),
+    "fertig": ("Fertig", "Getränk bitte entnehmen", "#1e88e5"),
+    "achtung": ("Achtung", "Bitte an der Maschine nachsehen", "#f9a825"),
+    "fehler": ("Störung", "Hinweis an der Maschine lesen", "#e53935"),
+}
+ZUSTAND_BILDER = {  # Betriebszustand von Home Connect → Variante
+    "inactive": "aus",
+    "ready": "bereit",
+    "delayedstart": "bereit",
+    "aborting": "bereit",
+    "run": "brueht",
+    "pause": "brueht",
+    "finished": "fertig",
+    "actionrequired": "achtung",
+    "error": "fehler",
+}
+UNBEKANNT_FILTER = "grayscale(100%) opacity(45%)"
+MARKIERUNGEN = (  # translation_key → Symbol und Stelle in der Zeichnung, wenn der Hinweis anliegt
+    ("water_tank_empty", "mdi:water-alert", (487, 275)),
+    ("bean_container_empty", "mdi:seed-off", (310, 48)),
+    ("drip_tray_full", "mdi:tray-alert", (310, 441)),
+    ("keep_milk_tank_cool", "mdi:cup-off", (356, 322)),
+    ("device_should_be_descaled", "mdi:water-off", (430, 112)),
+    ("device_descaling_overdue", "mdi:water-off", (430, 112)),
+    ("device_descaling_blockage", "mdi:water-off", (430, 112)),
+    ("device_should_be_calc_n_cleaned", "mdi:spray-bottle", (190, 112)),
+    ("device_calc_n_clean_overdue", "mdi:spray-bottle", (190, 112)),
+    ("device_calc_n_clean_blockage", "mdi:spray-bottle", (190, 112)),
+    ("device_should_be_cleaned", "mdi:broom", (190, 252)),
+    ("device_cleaning_overdue", "mdi:broom", (190, 252)),
+)
+EINSCHALTER_STELLE = (140, 112)
+TASSE_STELLE = (310, 410)
+SYMBOLGROESSE = "clamp(14px, 2vw, 32px)"
+SCHRIFTGROESSE = "clamp(11px, 1.8vw, 28px)"
+# Leeres Grundbild der Karte (gibt nur das Seitenverhältnis vor – sonst schiene es unter dem Zustandsbild durch)
+LEERES_BILD = "data:image/svg+xml;base64," + base64.b64encode(
+    b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 500' width='1200' height='500'/>"
+).decode()
+TIPPZIEL = "data:image/svg+xml;base64," + base64.b64encode(
+    b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10' width='10' height='10'/>"
+).decode()
+
+
+def bild_uri(svg: str) -> str:
+    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode()
+
+
+def _display(variante: str) -> str:
+    """Der Inhalt des Bildschirms je Variante (Bildschirm: x 190–430, y 112–252, Mitte 310/182)."""
+    text = f'font-family="{SCHRIFT}" text-anchor="middle" fill="#e3f2fd" font-weight="600"'
+    if variante == "aus":
+        return '<path d="M206 124 h52 l-30 116 h-22 z" fill="#ffffff" opacity=".035"/>'
+    if variante == "bereit":
+        return (
+            '<path d="M292 142 h36 v20 a18 18 0 0 1 -36 0 z" fill="#e3f2fd"/>'
+            '<path d="M330 148 h8 a8 8 0 0 1 0 16 h-8" fill="none" stroke="#e3f2fd" stroke-width="4"/>'
+            f'<text x="310" y="226" font-size="28" {text}>Bereit</text>'
+        )
+    if variante == "brueht":
+        return (
+            f'<text x="310" y="178" font-size="30" {text}>Brüht</text>'
+            '<rect x="220" y="200" width="180" height="12" rx="6" fill="#0a2a4f"/>'
+            '<rect x="220" y="200" width="0" height="12" rx="6" fill="#64b5f6">'
+            f'<animate attributeName="width" values="0;180" dur="{FUELLDAUER}" repeatCount="indefinite"/></rect>'
+        )
+    if variante == "fertig":
+        return (
+            f'<text x="310" y="172" font-size="30" {text}>Fertig</text>'
+            '<path d="M284 206 l16 16 l34 -34" fill="none" stroke="#a5d6a7" stroke-width="7" '
+            'stroke-linecap="round" stroke-linejoin="round"/>'
+        )
+    if variante == "achtung":
+        return (
+            '<g><path d="M310 130 L354 208 L266 208 z" fill="#ffd54f" stroke="#6d4c00" stroke-width="4" '
+            'stroke-linejoin="round"/>'
+            f'<text x="310" y="198" font-size="44" font-family="{SCHRIFT}" text-anchor="middle" '
+            'fill="#6d4c00" font-weight="700">!</text>'
+            '<animate attributeName="opacity" values="1;.25;1" dur="1.4s" repeatCount="indefinite"/></g>'
+            f'<text x="310" y="240" font-size="22" {text}>Bitte nachsehen</text>'
+        )
+    return (  # fehler
+        f'<text x="310" y="172" font-size="30" {text}>Fehler</text>'
+        '<path d="M292 192 l36 36 M328 192 l-36 36" stroke="#ef9a9a" stroke-width="7" stroke-linecap="round"/>'
+    )
+
+
+def konrad_svg(variante: str, name: str = "Konrad") -> str:
+    """Die Front eines Siemens-Vollautomaten (stilisiert) als SVG – animiert je nach Zustand.
+
+    Links die Maschine mit Bohnenbehältern, Bildschirm, Tasten, Auslauf, Glas auf dem
+    Tropfgitter und Wassertank, rechts Name, Statuszeile und Untertitel. Die Animationen
+    (SMIL) laufen auch, wenn das Bild als <img> eingebunden ist.
+    """
+    status, untertitel, farbe = BILD_VARIANTEN[variante]
+    an = variante != "aus"
+    brueht = variante == "brueht"
+    dampf = variante in ("brueht", "fertig")
+    led = "#9ecbff" if an else "#3a4047"
+    display_fill = {
+        "aus": "#07090d",
+        "achtung": "url(#display_amber)",
+        "fehler": "url(#display_rot)",
+    }.get(variante, "url(#display_blau)")
+    teile = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {BILD_BREITE} {BILD_HOEHE}" '
+        f'width="{BILD_BREITE}" height="{BILD_HOEHE}" role="img" aria-label="{name}: {status}">',
+        "<defs>",
+        '<linearGradient id="korpus" x1="0" y1="0" x2="1" y2="0">'
+        '<stop offset="0" stop-color="#2f343b"/><stop offset=".5" stop-color="#1b1f24"/>'
+        '<stop offset="1" stop-color="#2a2f36"/></linearGradient>',
+        '<linearGradient id="stahl" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#cfd8dc"/><stop offset=".5" stop-color="#8e9aa3"/>'
+        '<stop offset="1" stop-color="#b0bec5"/></linearGradient>',
+        '<linearGradient id="auslauf" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#3a4048"/><stop offset="1" stop-color="#14171b"/></linearGradient>',
+        '<linearGradient id="display_blau" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#0b2545"/><stop offset="1" stop-color="#134074"/></linearGradient>',
+        '<linearGradient id="display_amber" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#5d3a00"/><stop offset="1" stop-color="#8a5a00"/></linearGradient>',
+        '<linearGradient id="display_rot" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#6a1b1b"/><stop offset="1" stop-color="#9c2a2a"/></linearGradient>',
+        '<linearGradient id="wasser" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#81d4fa"/><stop offset="1" stop-color="#29b6f6"/></linearGradient>',
+        '<clipPath id="glas"><path d="M278 382 h64 l-5 50 h-54 z"/></clipPath>',
+        "</defs>",
+        # Schatten und Korpus
+        '<ellipse cx="310" cy="478" rx="235" ry="12" fill="#000" opacity=".22"/>',
+        '<rect x="110" y="70" width="400" height="400" rx="26" fill="url(#korpus)" stroke="#0e1013" stroke-width="2"/>',
+        '<rect x="150" y="96" width="320" height="202" rx="18" fill="#1d2126"/>',
+        '<rect x="110" y="446" width="400" height="24" rx="10" fill="url(#stahl)"/>',
+    ]
+    # Bohnenbehälter (zwei Hauben mit Bohnen)
+    for links in (160, 320):
+        mitte = links + 70
+        teile.append(
+            f'<path d="M{links} 72 q0 -46 70 -46 q70 0 70 46 z" fill="#3b4048" stroke="#0e1013" stroke-width="2"/>'
+        )
+        for i in range(6):
+            x = links + 18 + i * 22
+            teile.append(
+                f'<ellipse cx="{x}" cy="{62 if i % 2 else 57}" rx="8" ry="5" fill="#4e342e" '
+                f'transform="rotate({-25 if i % 2 else 20} {x} 60)"/>'
+            )
+        teile.append(
+            f'<path d="M{links + 14} 58 q{56} -34 {112} 0" fill="none" stroke="#7a8590" stroke-width="3" opacity=".55"/>'
+        )
+        teile.append(f'<rect x="{mitte - 10}" y="22" width="20" height="6" rx="3" fill="#8e9aa3"/>')
+    # Ein/Aus-Taste (das Symbol legt das Dashboard als tippbares Element darüber)
+    teile.append('<circle cx="140" cy="112" r="12" fill="#14171b" stroke="#6b7280" stroke-width="2"/>')
+    if an:
+        teile.append('<circle cx="140" cy="112" r="15" fill="none" stroke="#9ecbff" stroke-width="2" opacity=".55"/>')
+    # Bildschirm
+    teile.append(
+        f'<rect x="190" y="112" width="240" height="140" rx="12" fill="{display_fill}" stroke="#2c323a" stroke-width="3"/>'
+    )
+    teile.append(_display(variante))
+    # Tastenreihe mit LEDs
+    for x, r in ((215, 7), (260, 7), (310, 10), (360, 7), (405, 7)):
+        extra = (
+            '<animate attributeName="opacity" values="1;.3;1" dur="2.4s" repeatCount="indefinite"/>'
+            if an and x == 310 and not brueht
+            else ""
+        )
+        teile.append(f'<circle cx="{x}" cy="278" r="{r}" fill="{led}">{extra}</circle>')
+    # Auslauf mit zwei Öffnungen und Milchdüse
+    teile.append('<rect x="262" y="296" width="96" height="48" rx="10" fill="url(#auslauf)" stroke="#0e1013"/>')
+    teile.append('<rect x="286" y="342" width="10" height="10" fill="#0e1013"/>')
+    teile.append('<rect x="324" y="342" width="10" height="10" fill="#0e1013"/>')
+    teile.append('<rect x="353" y="330" width="6" height="26" rx="2" fill="#b0bec5"/>')
+    # Wassertank rechts
+    teile.append('<rect x="470" y="130" width="34" height="296" rx="8" fill="#263238" stroke="#0e1013"/>')
+    teile.append('<rect x="474" y="250" width="26" height="172" rx="6" fill="url(#wasser)" opacity=".6"/>')
+    teile.append('<rect x="478" y="118" width="18" height="8" rx="3" fill="#90a4ae"/>')
+    # Tropfgitter
+    teile.append('<rect x="150" y="434" width="320" height="14" rx="4" fill="url(#stahl)"/>')
+    teile.append(
+        '<g fill="#1a1d21">'
+        + "".join(f'<rect x="{x}" y="438" width="12" height="6" rx="2"/>' for x in range(166, 460, 24))
+        + "</g>"
+    )
+    # Glas: Inhalt (geclippt), dann das Glas selbst
+    if brueht:
+        teile.append(
+            '<g clip-path="url(#glas)"><rect x="270" y="434" width="80" height="0" fill="#5d3a1a">'
+            f'<animate attributeName="y" values="434;384" dur="{FUELLDAUER}" repeatCount="indefinite"/>'
+            f'<animate attributeName="height" values="0;50" dur="{FUELLDAUER}" repeatCount="indefinite"/>'
+            "</rect></g>"
+        )
+    elif variante == "fertig":
+        teile.append(
+            '<g clip-path="url(#glas)"><rect x="270" y="384" width="80" height="50" fill="#5d3a1a"/>'
+            '<rect x="270" y="384" width="80" height="9" fill="#c8a27a"/></g>'
+        )
+    teile.append(
+        '<path d="M276 378 h68 l-6 56 h-56 z" fill="#ffffff" fill-opacity=".16" stroke="#eceff1" '
+        'stroke-width="3" stroke-linejoin="round"/>'
+    )
+    teile.append(
+        '<path d="M345 392 q22 2 20 18 q-2 14 -22 14" fill="none" stroke="#eceff1" stroke-width="6" stroke-linecap="round"/>'
+    )
+    # Kaffeestrahlen
+    if brueht:
+        for x in (291, 329):
+            teile.append(
+                f'<line x1="{x}" y1="352" x2="{x}" y2="386" stroke="#5d3a1a" stroke-width="5" stroke-linecap="round" '
+                'stroke-dasharray="7 5"><animate attributeName="stroke-dashoffset" from="0" to="-24" dur=".45s" '
+                'repeatCount="indefinite"/></line>'
+            )
+    # Dampf
+    if dampf:
+        for i, x in enumerate((296, 310, 324)):
+            teile.append(
+                f'<path d="M{x} 374 c-7 -9 7 -15 0 -26" fill="none" stroke="#cfd8dc" stroke-width="4" '
+                f'stroke-linecap="round" opacity="0">'
+                f'<animateTransform attributeName="transform" type="translate" values="0 0;0 -30" dur="2.6s" '
+                f'begin="{i * 0.9:.1f}s" repeatCount="indefinite"/>'
+                f'<animate attributeName="opacity" values="0;.85;0" dur="2.6s" begin="{i * 0.9:.1f}s" '
+                'repeatCount="indefinite"/></path>'
+            )
+    # Rechts: Name, Status, Untertitel
+    teile.append(
+        f'<text x="600" y="160" font-size="42" font-weight="600" fill="#8d6e63" font-family="{SCHRIFT}">{name}</text>'
+    )
+    teile.append(
+        f'<text x="596" y="248" font-size="78" font-weight="700" fill="{farbe}" font-family="{SCHRIFT}">{status}</text>'
+    )
+    teile.append(f'<text x="600" y="302" font-size="32" fill="#90a4ae" font-family="{SCHRIFT}">{untertitel}</text>')
+    teile.append("</svg>")
+    return "\n".join(teile) + "\n"
+
+
+def stelle(x: float, y: float) -> dict[str, str]:
+    """Die Position eines Elements in Prozent der Zeichnung."""
+    return {"left": f"{x / BILD_BREITE * 100:.1f}%", "top": f"{y / BILD_HOEHE * 100:.1f}%"}
+
+
+def nicht_aus(entity_id: str) -> list[dict[str, str]]:
+    """Bedingung: Der Hinweis liegt an (nicht „off“, nicht unbekannt)."""
+    return [{"entity": entity_id, "state_not": zustand} for zustand in ("off", "unknown", "unavailable")]
+
+
+def kopfkarte(
+    maschine_name: str, maschine: dict[str, str], weitere: dict[str, tuple[str, str]]
+) -> Optional[dict[str, Any]]:
+    """Die Bildkarte für den Kopf des Dashboards: Zeichnung je Betriebszustand mit Tippzielen und Hinweisen.
+
+    Ohne Betriebszustand gibt es keine Zeichnung (None). Die Karte gehört in einen eigenen
+    Abschnitt über alle Spalten – als ``header`` der Ansicht bekäme sie nur eine Spalte.
+    """
+    zustand = maschine.get("zustand")
+    if not zustand:
+        return None
+    bilder = {variante: bild_uri(konrad_svg(variante, maschine_name)) for variante in BILD_VARIANTEN}
+    elemente: list[dict[str, Any]] = [
+        {
+            "type": "image",
+            "entity": zustand,
+            "image": bilder["aus"],
+            "state_image": {z: bilder[v] for z, v in ZUSTAND_BILDER.items()},
+            "filter": "none",
+            "state_filter": {"unavailable": UNBEKANNT_FILTER, "unknown": UNBEKANNT_FILTER},
+            "aspect_ratio": "12x5",
+            "style": {"left": "50%", "top": "50%", "width": "100%"},
+        },
+        {
+            "type": "icon",
+            "icon": "mdi:power",
+            "entity": maschine["einschalter"],
+            "title": "Ein / Aus",
+            "tap_action": {"action": "toggle"},
+            "style": {**stelle(*EINSCHALTER_STELLE), "color": "#eceff1", "--mdc-icon-size": SYMBOLGROESSE},
+        },
+        {
+            "type": "image",
+            "image": TIPPZIEL,
+            "title": "Jetzt zubereiten",
+            "tap_action": {"action": "perform-action", "perform_action": f"script.{SKRIPT_ZUBEREITEN}", "confirmation": TASSE},
+            "style": {**stelle(*TASSE_STELLE), "width": "8%"},
+        },
+    ]
+    laeuft = [{"entity": zustand, "state": "run"}]
+    if maschine.get("aktiv"):
+        elemente.append(
+            {
+                "type": "conditional",
+                "conditions": laeuft,
+                "elements": [
+                    {
+                        "type": "state-label",
+                        "entity": maschine["aktiv"],
+                        "style": {
+                            **stelle(600, 372),
+                            "transform": "translate(0, -50%)",
+                            "color": "#eceff1",
+                            "font-size": SCHRIFTGROESSE,
+                            "font-weight": "600",
+                            "max-width": "46%",
+                            "white-space": "nowrap",
+                            "overflow": "hidden",
+                            "text-overflow": "ellipsis",
+                        },
+                    }
+                ],
+            }
+        )
+    if maschine.get("fortschritt"):
+        elemente.append(
+            {
+                "type": "conditional",
+                "conditions": laeuft,
+                "elements": [
+                    {
+                        "type": "state-label",
+                        "entity": maschine["fortschritt"],
+                        "prefix": "Fortschritt ",
+                        "style": {
+                            **stelle(600, 428),
+                            "transform": "translate(0, -50%)",
+                            "color": "#90a4ae",
+                            "font-size": SCHRIFTGROESSE,
+                        },
+                    }
+                ],
+            }
+        )
+    for schluessel, symbol, (x, y) in MARKIERUNGEN:
+        if schluessel not in weitere:
+            continue
+        entity_id, name = weitere[schluessel]
+        elemente.append(
+            {
+                "type": "conditional",
+                "conditions": nicht_aus(entity_id),
+                "elements": [
+                    {
+                        "type": "icon",
+                        "icon": symbol,
+                        "entity": entity_id,
+                        "title": name,
+                        "tap_action": {"action": "more-info"},
+                        "style": {
+                            **stelle(x, y),
+                            "color": "#ffffff",
+                            "background": "#d32f2f",
+                            "border-radius": "50%",
+                            "padding": "3px",
+                            "--mdc-icon-size": SYMBOLGROESSE,
+                        },
+                    }
+                ],
+            }
+        )
+    return {
+        "type": "picture-elements",
+        "image": LEERES_BILD,
+        "elements": elemente,
+        "grid_options": {"columns": "full", "rows": "auto"},
+    }
+
+
+def ohne_bilder(objekt: Any) -> Any:
+    """Für die Ausgabe: eingebettete Bilder auf ihre Länge kürzen."""
+    if isinstance(objekt, dict):
+        return {k: ohne_bilder(v) for k, v in objekt.items()}
+    if isinstance(objekt, list):
+        return [ohne_bilder(v) for v in objekt]
+    if isinstance(objekt, str) and objekt.startswith("data:image/svg+xml;base64,"):
+        return f"data:image/svg+xml;base64,… ({len(objekt)} Zeichen)"
+    return objekt
+
+
 def kachel(entity_id: str, name: str, icon: str, farbe: str, **mehr: Any) -> dict[str, Any]:
     return {"type": "tile", "entity": entity_id, "name": name, "icon": icon, "color": farbe, **mehr}
 
@@ -2275,6 +2657,7 @@ def dashboard_konfiguration(
 ) -> dict[str, Any]:
     """Das Dashboard: Lieblingsgetränke je Person, Getränk zusammenstellen, die Maschine direkt, Wartung, Zähler.
 
+    Ganz oben, über alle Spalten, die Zeichnung der Maschine, animiert je Betriebszustand (siehe ``kopfkarte``).
     ``weitere`` ordnet translation_keys weiterer Entitäten der Maschine (Wartungshinweise,
     Zähler) ihre Entitäts-ID und ihren Namen zu.
     """
@@ -2552,20 +2935,19 @@ def dashboard_konfiguration(
                 }
             )
 
-    return {
+    ansicht: dict[str, Any] = {
         "title": maschine_name,
-        "views": [
-            {
-                "title": maschine_name,
-                "path": "kaffee",
-                "icon": "mdi:coffee",
-                "type": "sections",
-                "max_columns": 3,
-                "badges": badges,
-                "sections": abschnitte,
-            }
-        ],
+        "path": "kaffee",
+        "icon": "mdi:coffee",
+        "type": "sections",
+        "max_columns": 3,
+        "badges": badges,
+        "sections": abschnitte,
     }
+    kopf = kopfkarte(maschine_name, maschine, weitere)
+    if kopf:
+        abschnitte.insert(0, {"type": "grid", "column_span": 3, "cards": [kopf]})
+    return {"title": maschine_name, "views": [ansicht]}
 
 
 def zustaende_laden(ha: HomeAssistant, zustaende: dict[str, dict[str, Any]]) -> None:
@@ -2762,8 +3144,8 @@ def getraenke_einrichten(
     if args.nur_anzeigen:
         print("\nDiese Skripte würden angelegt (nichts geändert):")
         print(json.dumps(skripte, indent=2, ensure_ascii=False))
-        print("\nUnd dieses Dashboard:")
-        print(json.dumps(dashboard, indent=2, ensure_ascii=False))
+        print("\nUnd dieses Dashboard (eingebettete Bilder gekürzt):")
+        print(json.dumps(ohne_bilder(dashboard), indent=2, ensure_ascii=False))
         return 0
 
     for kennung, config in skripte.items():
@@ -2844,6 +3226,7 @@ def beispiel_konfigurationen() -> dict[str, Any]:
     return {
         "skripte": skript_konfigurationen(maschine, helfer, alle_plaetze, "GERAETE_ID_VON_KONRAD", getraenke),
         "dashboard": dashboard_konfiguration("Konrad", maschine, helfer, plaetze_je_person, weitere),
+        "bilder": {variante: konrad_svg(variante, "Konrad") for variante in BILD_VARIANTEN},
     }
 
 
