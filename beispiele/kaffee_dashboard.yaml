@@ -1,0 +1,535 @@
+# Dashboard für die Kaffeemaschine – genau so legt es
+#   python3 installieren.py --getraenke --personen Jens,Nicole
+# in Home Assistant an (Seitenleiste „Konrad“). Zum Nachlesen oder von Hand: Einstellungen →
+# Dashboards → Dashboard hinzufügen → „Neues Dashboard von Grund auf“ → öffnen → Stift (bearbeiten) →
+# Menü (⋮) → „Rohkonfigurations-Editor“ → diesen Inhalt einfügen → Speichern.
+# Die Entitäts-IDs (konrad_…, kaffee_…, lieblingsgetrank_…) heißen bei dir anders – das Skript
+# liest die echten aus Home Assistant; von Hand müssen sie angepasst werden.
+title: Konrad
+views:
+- title: Konrad
+  path: kaffee
+  icon: mdi:coffee
+  type: sections
+  max_columns: 3
+  badges:
+  - type: entity
+    entity: sensor.konrad_betriebszustand
+    name: Konrad
+    show_name: true
+    show_state: true
+    show_icon: true
+    color: brown
+  - type: entity
+    entity: switch.konrad_einschalter
+    name: Strom
+    show_name: true
+    show_state: true
+    show_icon: true
+    color: green
+  - type: entity
+    entity: sensor.konrad_bohnenbehalter_leer
+    name: Bohnenbehälter leer
+    show_name: true
+    show_state: false
+    show_icon: true
+    color: red
+    visibility:
+    - condition: state
+      entity: sensor.konrad_bohnenbehalter_leer
+      state_not:
+      - 'off'
+      - unknown
+      - unavailable
+  - type: entity
+    entity: sensor.konrad_entkalken_des_gerats_empfohlen
+    name: Entkalken des Geräts empfohlen
+    show_name: true
+    show_state: false
+    show_icon: true
+    color: red
+    visibility:
+    - condition: state
+      entity: sensor.konrad_entkalken_des_gerats_empfohlen
+      state_not:
+      - 'off'
+      - unknown
+      - unavailable
+  - type: entity
+    entity: sensor.konrad_tropfschale_voll
+    name: Tropfschale voll
+    show_name: true
+    show_state: false
+    show_icon: true
+    color: red
+    visibility:
+    - condition: state
+      entity: sensor.konrad_tropfschale_voll
+      state_not:
+      - 'off'
+      - unknown
+      - unavailable
+  - type: entity
+    entity: sensor.konrad_wassertank_leer
+    name: Wassertank leer
+    show_name: true
+    show_state: false
+    show_icon: true
+    color: red
+    visibility:
+    - condition: state
+      entity: sensor.konrad_wassertank_leer
+      state_not:
+      - 'off'
+      - unknown
+      - unavailable
+  sections:
+  - type: grid
+    cards:
+    - type: heading
+      heading: Jens
+      heading_style: title
+      icon: mdi:account-circle
+    - type: tile
+      entity: input_text.lieblingsgetrank_jens_1
+      name: Jens 1
+      icon: mdi:coffee
+      color: amber
+      vertical: true
+      state_content: state
+      tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: jens_1
+        confirmation: &id001
+          text: Steht eine Tasse unter dem Auslauf? Dann geht es los.
+      icon_tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: jens_1
+        confirmation: *id001
+      hold_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_speichern
+        data:
+          platz: jens_1
+        confirmation:
+          text: Die aktuelle Zusammenstellung auf „Jens 1“ speichern?
+      grid_options:
+        columns: 4
+        rows: 2
+    - type: tile
+      entity: input_text.lieblingsgetrank_jens_2
+      name: Jens 2
+      icon: mdi:coffee
+      color: amber
+      vertical: true
+      state_content: state
+      tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: jens_2
+        confirmation: *id001
+      icon_tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: jens_2
+        confirmation: *id001
+      hold_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_speichern
+        data:
+          platz: jens_2
+        confirmation:
+          text: Die aktuelle Zusammenstellung auf „Jens 2“ speichern?
+      grid_options:
+        columns: 4
+        rows: 2
+    - type: tile
+      entity: input_text.lieblingsgetrank_jens_3
+      name: Jens 3
+      icon: mdi:coffee
+      color: amber
+      vertical: true
+      state_content: state
+      tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: jens_3
+        confirmation: *id001
+      icon_tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: jens_3
+        confirmation: *id001
+      hold_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_speichern
+        data:
+          platz: jens_3
+        confirmation:
+          text: Die aktuelle Zusammenstellung auf „Jens 3“ speichern?
+      grid_options:
+        columns: 4
+        rows: 2
+    - type: markdown
+      content: Tippen bereitet das Getränk zu. Gedrückt halten speichert die aktuelle Zusammenstellung auf dem Platz.
+      grid_options:
+        columns: full
+  - type: grid
+    cards:
+    - type: heading
+      heading: Nicole
+      heading_style: title
+      icon: mdi:account-circle
+    - type: tile
+      entity: input_text.lieblingsgetrank_nicole_1
+      name: Nicole 1
+      icon: mdi:coffee
+      color: amber
+      vertical: true
+      state_content: state
+      tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: nicole_1
+        confirmation: *id001
+      icon_tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: nicole_1
+        confirmation: *id001
+      hold_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_speichern
+        data:
+          platz: nicole_1
+        confirmation:
+          text: Die aktuelle Zusammenstellung auf „Nicole 1“ speichern?
+      grid_options:
+        columns: 4
+        rows: 2
+    - type: tile
+      entity: input_text.lieblingsgetrank_nicole_2
+      name: Nicole 2
+      icon: mdi:coffee
+      color: amber
+      vertical: true
+      state_content: state
+      tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: nicole_2
+        confirmation: *id001
+      icon_tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: nicole_2
+        confirmation: *id001
+      hold_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_speichern
+        data:
+          platz: nicole_2
+        confirmation:
+          text: Die aktuelle Zusammenstellung auf „Nicole 2“ speichern?
+      grid_options:
+        columns: 4
+        rows: 2
+    - type: tile
+      entity: input_text.lieblingsgetrank_nicole_3
+      name: Nicole 3
+      icon: mdi:coffee
+      color: amber
+      vertical: true
+      state_content: state
+      tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: nicole_3
+        confirmation: *id001
+      icon_tap_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_zubereiten
+        data:
+          platz: nicole_3
+        confirmation: *id001
+      hold_action:
+        action: perform-action
+        perform_action: script.lieblingsgetraenk_speichern
+        data:
+          platz: nicole_3
+        confirmation:
+          text: Die aktuelle Zusammenstellung auf „Nicole 3“ speichern?
+      grid_options:
+        columns: 4
+        rows: 2
+    - type: markdown
+      content: Tippen bereitet das Getränk zu. Gedrückt halten speichert die aktuelle Zusammenstellung auf dem Platz.
+      grid_options:
+        columns: full
+  - type: grid
+    cards:
+    - type: heading
+      heading: Getränk zusammenstellen
+      heading_style: title
+      icon: mdi:coffee-maker
+    - type: tile
+      entity: input_select.kaffee_getrank
+      name: Getränk
+      icon: mdi:coffee
+      color: brown
+      features:
+      - type: select-options
+      grid_options:
+        columns: full
+    - type: tile
+      entity: input_select.kaffee_starke
+      name: Stärke
+      icon: mdi:seed
+      color: brown
+      features:
+      - type: select-options
+    - type: tile
+      entity: input_select.kaffee_temperatur
+      name: Temperatur
+      icon: mdi:thermometer
+      color: red
+      features:
+      - type: select-options
+    - type: tile
+      entity: input_select.kaffee_milchanteil
+      name: Milchanteil
+      icon: mdi:cup
+      color: blue-grey
+      features:
+      - type: select-options
+    - type: tile
+      entity: input_select.kaffee_intensitat
+      name: Intensität
+      icon: mdi:speedometer
+      color: orange
+      features:
+      - type: select-options
+    - type: tile
+      entity: input_number.kaffee_menge
+      name: Menge
+      icon: mdi:cup-water
+      color: blue
+      features:
+      - type: numeric-input
+        style: slider
+      grid_options:
+        columns: full
+    - type: tile
+      entity: input_boolean.kaffee_doppelt
+      name: Doppelt (zwei Tassen)
+      icon: mdi:numeric-2-box-multiple
+      color: amber
+      features:
+      - type: toggle
+    - type: button
+      name: Jetzt zubereiten
+      icon: mdi:coffee
+      icon_height: 56px
+      show_state: false
+      tap_action:
+        action: perform-action
+        perform_action: script.kaffee_zubereiten
+        confirmation: *id001
+      grid_options:
+        columns: full
+        rows: 2
+    - type: markdown
+      content: „wie an der Maschine“ und Menge 0 lassen die Einstellung der Maschine unangetastet. Was ein Getränk
+        nicht anbietet, wird übersprungen.
+      grid_options:
+        columns: full
+  - type: grid
+    cards:
+    - type: heading
+      heading: Konrad
+      heading_style: title
+      icon: mdi:coffee-maker-outline
+    - type: tile
+      entity: switch.konrad_einschalter
+      name: Ein / Aus
+      icon: mdi:power
+      color: green
+      features:
+      - type: toggle
+    - type: tile
+      entity: switch.konrad_kindersicherung
+      name: Kindersicherung
+      icon: mdi:lock
+      color: grey
+      features:
+      - type: toggle
+    - type: tile
+      entity: sensor.konrad_betriebszustand
+      name: Zustand
+      icon: mdi:state-machine
+      color: brown
+    - type: tile
+      entity: binary_sensor.konrad_fernstart
+      name: Fernstart erlaubt
+      icon: mdi:remote
+      color: teal
+    - type: gauge
+      entity: sensor.konrad_programm_fortschritt
+      name: Fortschritt
+      min: 0
+      max: 100
+      severity:
+        green: 0
+        yellow: 50
+        red: 90
+      visibility: &id002
+      - condition: state
+        entity: sensor.konrad_betriebszustand
+        state:
+        - run
+        - pause
+        - delayedstart
+        - actionrequired
+        - aborting
+      grid_options:
+        columns: 6
+        rows: 3
+    - type: tile
+      entity: sensor.konrad_programm_endzeit
+      name: Fertig um
+      icon: mdi:clock-end
+      color: brown
+      visibility: *id002
+    - type: button
+      name: Abbrechen
+      icon: mdi:stop-circle
+      show_state: false
+      tap_action:
+        action: perform-action
+        perform_action: button.press
+        target:
+          entity_id: button.konrad_programm_stoppen
+      visibility: *id002
+    - type: markdown
+      content: '**Direkt an der Maschine.** Ein Getränk unter „Sofort starten“ startet ohne Rückfrage – Tasse hinstellen!
+        Die Optionen darunter gehören zum ausgewählten Programm.'
+      grid_options:
+        columns: full
+    - type: tile
+      entity: select.konrad_aktives_programm
+      name: Sofort starten
+      icon: mdi:play-circle
+      color: red
+      features:
+      - type: select-options
+      grid_options:
+        columns: full
+    - type: tile
+      entity: select.konrad_ausgewahltes_programm
+      name: Ausgewähltes Programm
+      icon: mdi:format-list-bulleted
+      color: brown
+      features:
+      - type: select-options
+      grid_options:
+        columns: full
+    - type: tile
+      entity: select.konrad_bohnenmenge
+      name: Stärke
+      icon: mdi:seed
+      color: brown
+      features:
+      - type: select-options
+    - type: tile
+      entity: select.konrad_kaffee_temperatur
+      name: Temperatur
+      icon: mdi:thermometer
+      color: red
+      features:
+      - type: select-options
+    - type: tile
+      entity: select.konrad_kaffee_milch_verhaltnis
+      name: Milchanteil
+      icon: mdi:cup
+      color: blue-grey
+      features:
+      - type: select-options
+    - type: tile
+      entity: select.konrad_durchflussrate
+      name: Intensität
+      icon: mdi:speedometer
+      color: orange
+      features:
+      - type: select-options
+    - type: tile
+      entity: number.konrad_fullmenge
+      name: Füllmenge
+      icon: mdi:cup-water
+      color: blue
+      features:
+      - type: numeric-input
+        style: slider
+      grid_options:
+        columns: full
+    - type: tile
+      entity: switch.konrad_mehrere_getranke
+      name: Mehrere Getränke
+      icon: mdi:numeric-2-box-multiple
+      color: amber
+      features:
+      - type: toggle
+  - type: grid
+    cards:
+    - type: heading
+      heading: Wartung
+      heading_style: title
+      icon: mdi:wrench
+    - type: tile
+      entity: sensor.konrad_bohnenbehalter_leer
+      name: Bohnenbehälter leer
+      icon: mdi:seed-off
+      color: brown
+    - type: tile
+      entity: sensor.konrad_entkalken_des_gerats_empfohlen
+      name: Entkalken des Geräts empfohlen
+      icon: mdi:water-off
+      color: deep-orange
+    - type: tile
+      entity: sensor.konrad_tropfschale_voll
+      name: Tropfschale voll
+      icon: mdi:tray-alert
+      color: grey
+    - type: tile
+      entity: sensor.konrad_wassertank_leer
+      name: Wassertank leer
+      icon: mdi:water-alert
+      color: blue
+  - type: grid
+    cards:
+    - type: heading
+      heading: Zähler
+      heading_style: title
+      icon: mdi:counter
+    - type: tile
+      entity: sensor.konrad_kaffee_und_milchtassen
+      name: Kaffee- und Milchtassen
+      icon: mdi:counter
+      color: brown
+    - type: tile
+      entity: sensor.konrad_kaffees
+      name: Kaffees
+      icon: mdi:counter
+      color: brown

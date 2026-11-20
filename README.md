@@ -102,6 +102,7 @@ genau einen Ersatz, übernimmt das Skript ihn von selbst. Nützliche Optionen
 | `--licht switch.led_kaffee` | Ein Licht oder eine Steckdose an der Maschine (`light.…` oder `switch.…`) geht in einer zweiten Automation mit der Kaffeemaschine an und aus – egal ob die Automation, Home Assistant oder jemand am Gerät sie einschaltet. Ohne Wert sucht das Skript das Licht selbst: Geräte mit „Kaffee“ im Namen, neu angelegte zuerst – so übernimmt `python3 installieren.py --licht` eine ersetzte Steckdose. Eine deaktivierte Entität wird dabei aktiviert. |
 | `--dunkel` | Das Licht geht nur an, wenn es dunkel ist. Ohne Wert sucht das Skript einen Helligkeitssensor (Geräteklasse „illuminance“ oder Einheit lx), bevorzugt einen aus der Küche, etwa den des Bewegungsmelders; deaktivierte Helligkeitssensoren bietet es zum Aktivieren an. Sonst `--dunkel sensor.…`. `--dunkel aus` entfernt die Bedingung wieder. |
 | `--dunkel-unter 20` | Bis zu welcher Helligkeit es „dunkel“ ist (Standard 20 lx). Darüber bleibt das Licht aus bzw. geht aus, sobald es hell wird. |
+| `--getraenke --personen Jens,Nicole` | Richtet statt der Automation das [Dashboard für die Kaffeemaschine](#dashboard-für-die-kaffeemaschine) ein: Getränke wählen und anpassen, Lieblingsgetränke je Person, Bedienung, Wartung, Zähler. `--plaetze 5` gibt jeder Person fünf statt drei Plätze. |
 | `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
 
 Das Skript legt die Automation ohne Blueprint an (wie in
@@ -129,6 +130,65 @@ Helligkeit des Melders in Home Assistant deaktiviert (so legt Homematic(IP)
 Local sie oft an), bietet das Skript sie zum Aktivieren an. Ältere
 Homematic-Melder melden ihre Helligkeit ohne Lux-Einheit auf einer Skala
 von 0 bis 255; dann gilt `--dunkel-unter` in dieser Skala.
+
+## Dashboard für die Kaffeemaschine
+
+```bash
+python3 installieren.py --getraenke --personen Jens,Nicole
+```
+
+legt in Home Assistant ein eigenes Dashboard an – in der Seitenleiste unter dem
+Namen der Maschine (z. B. „Konrad“, Symbol Kaffeetasse) – mit allem, was sich
+über Home Connect bedienen lässt:
+
+- **Lieblingsgetränke je Person**: drei Plätze für jede angegebene Person
+  (`--plaetze` ändert die Anzahl, höchstens fünf). **Tippen** bereitet das
+  gespeicherte Getränk zu – nach der Rückfrage „Steht eine Tasse unter dem
+  Auslauf?“. **Gedrückt halten** speichert die aktuelle Zusammenstellung auf
+  dem Platz; die Kachel zeigt sie dann an („Cappuccino · stark · 180 ml ·
+  doppelt“).
+- **Getränk zusammenstellen**: alle Getränke, die die Maschine meldet (bei
+  Konrad 33, vom Espresso bis zum Dead Eye), dazu Stärke, Temperatur,
+  Milchanteil, Intensität (Durchflussrate), Menge in ml und „Doppelt“ für zwei
+  Tassen – bei Maschinen mit zwei Bohnenbehältern oder Heißwasser-Temperatur
+  auch diese. „wie an der Maschine“ und Menge 0 lassen die Einstellung der
+  Maschine unangetastet; was ein Getränk nicht anbietet, wird übersprungen.
+  **Jetzt zubereiten** schaltet die Maschine bei Bedarf ein, wartet, bis sie
+  bereit ist, wählt das Getränk, setzt die Optionen und startet.
+- **Die Maschine direkt**: Ein/Aus, Kindersicherung, Tassenwärmer (falls
+  vorhanden), Zustand, Fernstart erlaubt; während ein Getränk läuft Fortschritt,
+  „Fertig um“ und eine Taste „Abbrechen“. Außerdem „Sofort starten“ (das aktive
+  Programm der Maschine – startet ohne Rückfrage), das ausgewählte Programm und
+  dessen Optionen so, wie Home Connect sie meldet.
+- **Wartung und Zähler**: Wassertank leer, Bohnenbehälter leer, Tropfschale
+  voll, Entkalken, Calc'n'Clean … (Home Assistant hat diese Hinweise ab Werk
+  deaktiviert – das Skript aktiviert sie) und die Zähler der Maschine. Was
+  gerade anliegt, erscheint zusätzlich rot im Kopf des Dashboards.
+
+Dafür legt das Skript Helfer („Kaffee: Getränk“, „Kaffee: Stärke“, …,
+„Lieblingsgetränk Jens 1“) und drei Skripte an: „Kaffee zubereiten“,
+„Lieblingsgetränk speichern“ und „Lieblingsgetränk zubereiten“ (zum Nachlesen:
+[`beispiele/kaffee_skripte.yaml`](beispiele/kaffee_skripte.yaml), das Dashboard
+in [`beispiele/kaffee_dashboard.yaml`](beispiele/kaffee_dashboard.yaml)). Ein
+zweiter Aufruf aktualisiert alles und lässt gespeicherte Lieblingsgetränke
+stehen. Kennt Home Assistant Getränke und Optionen der Maschine noch nicht
+(sie war mit Home Assistant noch nie an), bietet das Skript an, die Maschine
+kurz einzuschalten und Cappuccino auszuwählen – gebrüht wird nichts, und sie
+geht danach wieder aus.
+
+Gut zu wissen:
+
+- Die Maschine muss den **Fernstart** erlauben (Menü der Maschine →
+  Home Connect → Fernstart). Sonst erklärt das Skript das in einer
+  Benachrichtigung, statt ins Leere zu laufen.
+- Der **Barista-Modus** der Maschine ist der Bildschirm mit sechs
+  Brühparametern. Fünf davon sind über Home Connect erreichbar und im Dashboard
+  einstellbar (Stärke, Menge, Milchanteil, Durchflussrate = Kontaktzeit,
+  Temperatur); nur der **Mahlgrad** bleibt der Maschine selbst vorbehalten.
+- **Sprache**: Gibst du die drei Skripte unter Einstellungen → Sprachassistenten
+  → Freigeben für Assist frei, reicht in der App „Mach Jens’ Lieblingskaffee 1“
+  oder „Cappuccino, stark, doppelt“ – auch über einen angebundenen
+  KI-Assistenten.
 
 ## Einrichten mit Blueprint
 
@@ -227,7 +287,9 @@ Warum die Automation (nicht) gelaufen ist, zeigt ihre **Ablaufverfolgung**
 | [`beispiele/automation_ohne_blueprint.yaml`](beispiele/automation_ohne_blueprint.yaml) | Dieselbe Automation ohne Blueprint |
 | [`beispiele/licht_folgt_kaffeemaschine.yaml`](beispiele/licht_folgt_kaffeemaschine.yaml) | Zweite Automation (optional): Licht an der Maschine folgt der Kaffeemaschine |
 | [`beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml`](beispiele/licht_folgt_kaffeemaschine_wenn_dunkel.yaml) | Dieselbe zweite Automation, aber nur bei Dunkelheit (Helligkeitssensor) |
-| [`installieren.py`](installieren.py) | Richtet die Automation per Befehl in Home Assistant ein |
+| [`beispiele/kaffee_dashboard.yaml`](beispiele/kaffee_dashboard.yaml) | Das Dashboard für die Kaffeemaschine (`--getraenke`) |
+| [`beispiele/kaffee_skripte.yaml`](beispiele/kaffee_skripte.yaml) | Die drei Skripte zum Dashboard: zubereiten, Lieblingsgetränk speichern und zubereiten |
+| [`installieren.py`](installieren.py) | Richtet die Automation – oder mit `--getraenke` das Dashboard – per Befehl in Home Assistant ein |
 | [`tests/`](tests/) | Automatische Tests |
 
 ## Tests
@@ -236,8 +298,10 @@ Die Tests starten ein echtes Home Assistant, laden Blueprint und YAML-Variante
 und spielen u. a. Uhrzeiten an den Grenzen des Zeitfensters, alle
 Alarmanlagen-Zustände, Neustarts, abgebrochenes Scharfschalten und eine schon
 laufende Maschine durch. `installieren.py` wird gegen den echten HTTP-Server
-von Home Assistant getestet, samt Anmeldung, Gerätesuche und Probelauf. Die
-Tests laufen bei jedem Push über GitHub Actions; lokal mit Python 3.14:
+von Home Assistant getestet, samt Anmeldung, Gerätesuche und Probelauf; für das
+Dashboard spielt eine Nachbildung der Kaffeemaschine mit allen Home-Connect-Entitäten
+mit, bis hin zum Zubereiten über die angelegten Skripte. Die Tests laufen bei
+jedem Push über GitHub Actions; lokal mit Python 3.14:
 
 ```bash
 pip install -r requirements_test.txt

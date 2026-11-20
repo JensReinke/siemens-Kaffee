@@ -23,6 +23,14 @@ Mit --dunkel geht das Licht nur an, wenn ein Helligkeitssensor – z. B. der des
 Bewegungsmelders in der Küche – Dunkelheit meldet (Standard: höchstens 20 Lux),
 und aus, sobald es hell wird.
 
+Mit --getraenke --personen Jens,Nicole richtet es statt der Automation ein
+Dashboard für die Kaffeemaschine ein: Getränk wählen und anpassen (Stärke,
+Menge, Temperatur, Milchanteil, Intensität, doppelt), Lieblingsgetränke je
+Person speichern und per Tipp zubereiten, dazu alles, was die Maschine sonst
+bedienen lässt (Ein/Aus, Kindersicherung, Programm, Abbrechen, Fortschritt,
+Wartungshinweise, Zähler). Dafür legt es Helfer, drei Skripte und das
+Dashboard „Konrad“ in der Seitenleiste an.
+
 Aufruf im Heimnetz, z. B. auf einem Mac oder PC:
 
     python3 installieren.py --url http://homeassistant.local:8123
@@ -48,6 +56,7 @@ import ssl
 import struct
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -317,6 +326,11 @@ class HomeAssistant:
         """Die Register von Home Assistant – werden beim ersten Zugriff geholt."""
         if self._register is None:
             self._register = Register(self)
+        return self._register
+
+    def register_aktualisieren(self) -> "Register":
+        """Holt die Register neu – nach dem Aktivieren oder Anlegen von Entitäten."""
+        self._register = Register(self)
         return self._register
 
     def anfrage(
@@ -857,7 +871,8 @@ def hinweis_deaktiviert(entity_ids: list[str], option: str = "--alarmanlage") ->
 class WebSocket:
     """Ein kleiner WebSocket-Client (RFC 6455) für die WebSocket-API von Home Assistant.
 
-    Nur für das nötig, was die REST-API nicht kann: eine Entität aktivieren.
+    Nur für das nötig, was die REST-API nicht kann: Entitäten aktivieren, die Register
+    lesen, Helfer und Dashboards anlegen.
     """
 
     def __init__(self, url: str, token: Optional[str]) -> None:
@@ -1682,12 +1697,1163 @@ def licht_pruefen(
     )
 
 
+# ---------------------------------------------------------------------------
+# Dashboard für die Kaffeemaschine (--getraenke): Getränke, Optionen,
+# Lieblingsgetränke, Bedienung, Wartung und Zähler
+# ---------------------------------------------------------------------------
+
+DASHBOARD_URL = "kaffee-konrad"  # Dashboards brauchen einen Bindestrich im Pfad
+SKRIPT_ZUBEREITEN = "kaffee_zubereiten"
+SKRIPT_SPEICHERN = "lieblingsgetraenk_speichern"
+SKRIPT_LIEBLING = "lieblingsgetraenk_zubereiten"
+HELFER_PRAEFIX = "Kaffee"  # Helfer heißen „Kaffee: Getränk“, „Kaffee: Stärke“ …
+WIE_MASCHINE = "wie an der Maschine"
+PLATZ_FREI = "frei – gedrückt halten, um die Zusammenstellung zu speichern"
+MAX_PERSONEN = 4
+MAX_PLAETZE = 5
+STANDARD_PLAETZE = 3
+PROGRAMM_PRAEFIX = "consumer_products_coffee_maker_program_"
+ENUM_PRAEFIX = "consumer_products_coffee_maker_enum_type_"
+VORBEREITUNG_SEKUNDEN = 90  # so lange wartet das Skript, bis die Maschine an und bereit ist
+VORBEREITUNG_PAUSE = 3  # Sekunden, bis Home Assistant die Optionen des gewählten Getränks kennt
+OPTIONEN_PAUSE = 1  # Sekunden im Skript zwischen Getränkewahl und Optionen
+AUSWAHL_SEKUNDEN = 10  # so lange wartet das Skript, bis die Maschine das Getränk übernommen hat
+SKRIPT_SEKUNDEN = 10  # so lange wartet das Skript, bis ein gespeichertes Skript in Home Assistant auftaucht
+# Deutsche Namen der Getränke, wie Home Connect sie schlüsselt (ohne Programm-Präfix).
+GETRAENKE_NAMEN = {
+    "beverage_espresso": "Espresso",
+    "beverage_espresso_doppio": "Espresso Doppio",
+    "beverage_coffee": "Kaffee",
+    "beverage_caffe_grande": "Caffè Grande",
+    "beverage_x_l_coffee": "XL-Kaffee",
+    "beverage_cappuccino": "Cappuccino",
+    "beverage_latte_macchiato": "Latte Macchiato",
+    "beverage_caffe_latte": "Caffè Latte",
+    "beverage_milk_froth": "Milchschaum",
+    "beverage_warm_milk": "Warme Milch",
+    "beverage_hot_water": "Heißwasser",
+    "beverage_ristretto": "Ristretto",
+    "beverage_espresso_macchiato": "Espresso Macchiato",
+    "beverage_coffee_pot": "Kaffeekanne",
+    "coffee_world_verlaengerter": "Verlängerter",
+    "coffee_world_kleiner_brauner": "Kleiner Brauner",
+    "coffee_world_wiener_melange": "Wiener Melange",
+    "coffee_world_flat_white": "Flat White",
+    "coffee_world_cafe_con_leche": "Café con Leche",
+    "coffee_world_cafe_au_lait": "Café au Lait",
+    "coffee_world_koffie_verkeerd": "Koffie Verkeerd",
+    "coffee_world_americano": "Americano",
+    "coffee_world_grosser_brauner": "Großer Brauner",
+    "coffee_world_verlaengerter_braun": "Verlängerter Braun",
+    "coffee_world_cortado": "Cortado",
+    "coffee_world_doppio": "Doppio",
+    "coffee_world_cafe_cortado": "Café Cortado",
+    "coffee_world_kaapi": "Kaapi",
+    "coffee_world_galao": "Galão",
+    "coffee_world_garoto": "Garoto",
+    "coffee_world_red_eye": "Red Eye",
+    "coffee_world_black_eye": "Black Eye",
+    "coffee_world_dead_eye": "Dead Eye",
+    "coffee_world_cold_brew": "Cold Brew",
+    "coffee_world_cold_brew_macchiato": "Cold Brew Macchiato",
+}
+# Auswahlwerte: (Anzeige, Endung des Home-Connect-Schlüssels)
+STAERKEN = [
+    ("sehr mild", "very_mild"), ("mild", "mild"), ("mild+", "mild_plus"), ("normal", "normal"),
+    ("normal+", "normal_plus"), ("stark", "strong"), ("stark+", "strong_plus"),
+    ("sehr stark", "very_strong"), ("sehr stark+", "very_strong_plus"), ("extra stark", "extra_strong"),
+    ("Double Shot", "double_shot"), ("Double Shot+", "double_shot_plus"),
+    ("Double Shot++", "double_shot_plus_plus"), ("Triple Shot", "triple_shot"),
+    ("Triple Shot+", "triple_shot_plus"), ("Pulverkaffee", "coffee_ground"),
+]
+TEMPERATUREN = [(f"{grad} °C", f"{grad}_c") for grad in (88, 90, 92, 94, 95, 96)]
+MILCHANTEILE = [
+    (f"{prozent} %", f"{prozent}_percent")
+    for prozent in (10, 20, 25, 30, 40, 50, 55, 60, 65, 67, 70, 75, 80, 85, 90)
+]
+INTENSITAETEN = [("Normal", "normal"), ("Intensiv", "intense"), ("Intensiv+", "intense_plus")]
+BOHNENBEHAELTER = [("links", "left"), ("rechts", "right")]
+HEISSWASSER = (
+    [("Weißer Tee", "white_tea"), ("Grüner Tee", "green_tea"), ("Schwarzer Tee", "black_tea")]
+    + [(f"{grad} °C", f"{grad}_c") for grad in (50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 97)]
+    + [("Maximal", "max")]
+)
+# Welche Entitäten der Kaffeemaschine das Dashboard nutzt: translation_key → Kurzname.
+MASCHINEN_SCHLUESSEL = {
+    "active_program": "aktiv",
+    "selected_program": "gewaehlt",
+    "bean_amount": "staerke",
+    "fill_quantity": "menge",
+    "coffee_temperature": "temperatur",
+    "coffee_milk_ratio": "milch",
+    "flow_rate": "intensitaet",
+    "bean_container": "bohnen",
+    "multiple_beverages": "doppelt",
+    "hot_water_temperature": "heisswasser",
+    "power": "einschalter",
+    "child_lock": "kindersicherung",
+    "cup_warmer": "tassenwaermer",
+    "stop_program": "stopp",
+    "operation_state": "zustand",
+    "program_progress": "fortschritt",
+    "program_finish_time": "endzeit",
+    "remote_start": "fernstart",
+}
+# Kurzname, Anzeigename, Werte, Teil des Enum-Schlüssels, Symbol, Farbe
+OPTIONEN = (
+    ("staerke", "Stärke", STAERKEN, "bean_amount_", "mdi:seed", "brown"),
+    ("temperatur", "Temperatur", TEMPERATUREN, "coffee_temperature_", "mdi:thermometer", "red"),
+    ("milch", "Milchanteil", MILCHANTEILE, "coffee_milk_ratio_", "mdi:cup", "blue-grey"),
+    ("intensitaet", "Intensität", INTENSITAETEN, "flow_rate_", "mdi:speedometer", "orange"),
+    ("bohnen", "Bohnenbehälter", BOHNENBEHAELTER, "bean_container_selection_", "mdi:silo", "brown"),
+    ("heisswasser", "Heißwasser-Temperatur", HEISSWASSER, "hot_water_temperature_", "mdi:kettle-steam", "teal"),
+)
+NUR_WENN_VORHANDEN = ("bohnen", "heisswasser")  # Helfer nur, wenn die Maschine die Option hat
+WARTUNG = re.compile(r"descal|calc_n_clean|water_tank|bean_container_empty|drip_tray|milk_tank|clean|rinse")
+ZAEHLER = re.compile(r"_counter$")
+WARTUNG_SYMBOLE = (  # Teil des Schlüssels → Symbol, Farbe
+    ("water_tank", "mdi:water-alert", "blue"),
+    ("bean_container", "mdi:seed-off", "brown"),
+    ("drip_tray", "mdi:tray-alert", "grey"),
+    ("milk", "mdi:cup-off", "blue-grey"),
+    ("descal", "mdi:water-off", "deep-orange"),
+    ("calc_n_clean", "mdi:spray-bottle", "teal"),
+    ("clean", "mdi:broom", "teal"),
+    ("rinse", "mdi:water-sync", "cyan"),
+)
+LAUFEND = ["run", "pause", "delayedstart", "actionrequired", "aborting"]
+TASSE = {"text": "Steht eine Tasse unter dem Auslauf? Dann geht es los."}
+
+
+def slug(text: str) -> str:
+    """Wie Home Assistant aus einem Namen eine Kennung macht: „Lieblingsgetränk Jens 1“ → lieblingsgetrank_jens_1."""
+    text = unicodedata.normalize("NFKD", text.replace("ß", "ss"))
+    text = "".join(zeichen for zeichen in text if not unicodedata.combining(zeichen))
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def anzahl_plaetze(text: str) -> int:
+    try:
+        zahl = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"„{text}“ ist keine Zahl") from None
+    if not 1 <= zahl <= MAX_PLAETZE:
+        raise argparse.ArgumentTypeError(f"1 bis {MAX_PLAETZE} Plätze je Person")
+    return zahl
+
+
+def personen_lesen(text: Optional[str]) -> list[str]:
+    personen = [p.strip() for p in (text or "").split(",") if p.strip()]
+    if not personen:
+        raise Abbruch("Für wen sollen Lieblingsgetränke angelegt werden? Zum Beispiel: --personen Jens,Nicole")
+    if len(personen) > MAX_PERSONEN:
+        raise Abbruch(f"Höchstens {MAX_PERSONEN} Personen – sonst wird das Dashboard unübersichtlich.")
+    kennungen = [slug(p) for p in personen]
+    if not all(kennungen) or len(set(kennungen)) != len(kennungen):
+        raise Abbruch("Die Namen in --personen müssen aus Buchstaben bestehen und sich unterscheiden.")
+    return personen
+
+
+def getraenk_name(schluessel: str) -> str:
+    kurz = schluessel[len(PROGRAMM_PRAEFIX):] if schluessel.startswith(PROGRAMM_PRAEFIX) else schluessel
+    if kurz in GETRAENKE_NAMEN:
+        return GETRAENKE_NAMEN[kurz]
+    return re.sub(r"^(beverage|coffee_world)_", "", kurz).replace("_", " ").title()
+
+
+def getraenke_liste(zustaende: dict[str, dict[str, Any]], aktiv: Optional[str]) -> list[tuple[str, str]]:
+    """(Anzeige, Programmschlüssel) der Getränke, die die Maschine meldet – ohne Reinigungsprogramme.
+
+    Meldet sie gerade keine (ausgeschaltet, noch nie an mit Home Assistant), gilt die Liste
+    aller bekannten Getränke.
+    """
+    optionen = ((zustaende.get(aktiv or "") or {}).get("attributes") or {}).get("options") or []
+    schluessel = [
+        o for o in optionen if isinstance(o, str) and o.startswith(PROGRAMM_PRAEFIX) and "cleaning" not in o
+    ]
+    if not schluessel:
+        schluessel = [PROGRAMM_PRAEFIX + kurz for kurz in GETRAENKE_NAMEN]
+    liste: list[tuple[str, str]] = []
+    for s in schluessel:
+        name = getraenk_name(s)
+        if name not in {n for n, _ in liste}:
+            liste.append((name, s))
+    return liste
+
+
+def kaffee_geraet(register: "Register", kaffeemaschine: str) -> Optional[dict[str, Any]]:
+    eintrag = register.entitaeten.get(kaffeemaschine) or {}
+    return register.geraete.get(eintrag.get("device_id") or "")
+
+
+def kaffee_entitaeten(register: "Register", kaffeemaschine: str) -> dict[str, dict[str, Any]]:
+    """translation_key → Registereintrag aller Entitäten am Gerät der Kaffeemaschine."""
+    geraet = kaffee_geraet(register, kaffeemaschine)
+    if not geraet:
+        return {}
+    ergebnis: dict[str, dict[str, Any]] = {}
+    for entitaet in register.entitaeten_von(geraet):
+        schluessel = entitaet.get("translation_key")
+        if schluessel and schluessel not in ergebnis:
+            ergebnis[schluessel] = entitaet
+    return ergebnis
+
+
+def bedienbare(eintraege: dict[str, dict[str, Any]], kaffeemaschine: str) -> dict[str, str]:
+    """Kurzname → Entitäts-ID der aktiven Entitäten, die das Dashboard bedient."""
+    maschine = {
+        kurz: e["entity_id"]
+        for schluessel, kurz in MASCHINEN_SCHLUESSEL.items()
+        if (e := eintraege.get(schluessel)) and not e.get("disabled_by")
+    }
+    maschine["einschalter"] = kaffeemaschine
+    return maschine
+
+
+def helfer_anlegen(ws: "WebSocket", domain: str, name: str, **felder: Any) -> str:
+    """Legt einen Helfer (input_select, input_number, …) an oder aktualisiert ihn; gibt die Entitäts-ID zurück.
+
+    Der Startwert (``initial``) bleibt dem Anlegen vorbehalten – ein zweiter Lauf
+    überschreibt keine gespeicherten Werte.
+    """
+    vorhandene = ws.befehl(type=f"{domain}/list") or []
+    treffer = next((h for h in vorhandene if isinstance(h, dict) and h.get("name") == name), None)
+    if treffer:
+        felder.pop("initial", None)
+        ws.befehl(type=f"{domain}/update", **{f"{domain}_id": treffer["id"]}, name=name, **felder)
+        return f"{domain}.{treffer['id']}"
+    neu = ws.befehl(type=f"{domain}/create", name=name, **felder)
+    return f"{domain}.{neu['id']}"
+
+
+def skript_anlegen(ha: HomeAssistant, kennung: str, config: dict[str, Any]) -> str:
+    """Speichert ein Skript über den Skript-Editor und wartet, bis es in Home Assistant auftaucht."""
+    pfad = f"/api/config/script/config/{kennung}"
+    status, text = ha.anfrage("POST", pfad, json_daten=config)
+    if status == 404:
+        raise Abbruch(
+            "Home Assistant hat keinen Skript-Editor (Integration „config“). "
+            "Sie gehört zu default_config und muss in der configuration.yaml aktiv sein."
+        )
+    ha._json(status, text, "POST", pfad)
+    entity_id = f"script.{kennung}"
+    for _ in range(SKRIPT_SEKUNDEN * 2):
+        status, _ = ha.anfrage("GET", f"/api/states/{entity_id}")
+        if status == 200:
+            return entity_id
+        time.sleep(0.5)
+    raise Abbruch(
+        f"Das Skript „{config.get('alias', kennung)}“ wurde gespeichert, taucht aber nicht in Home Assistant "
+        "auf. Steht in der configuration.yaml die Zeile „script: !include scripts.yaml“?"
+    )
+
+
+def dashboard_anlegen(ws: "WebSocket", url_path: str, titel: str, config: dict[str, Any]) -> bool:
+    """Legt das Dashboard an (falls neu) und speichert seine Konfiguration. True, wenn es neu war."""
+    vorhandene = ws.befehl(type="lovelace/dashboards/list") or []
+    neu = not any(isinstance(d, dict) and d.get("url_path") == url_path for d in vorhandene)
+    if neu:
+        ws.befehl(
+            type="lovelace/dashboards/create",
+            url_path=url_path,
+            title=titel,
+            icon="mdi:coffee",
+            show_in_sidebar=True,
+            require_admin=False,
+        )
+    ws.befehl(type="lovelace/config/save", url_path=url_path, config=config)
+    return neu
+
+
+def hinweis_aktion(text: str) -> dict[str, Any]:
+    return {
+        "action": "persistent_notification.create",
+        "data": {"title": "Kaffeemaschine", "message": text, "notification_id": "kaffee_dashboard"},
+    }
+
+
+def wertetabelle(werte: list[tuple[str, str]], enum_teil: str) -> dict[str, str]:
+    return {anzeige: f"{ENUM_PRAEFIX}{enum_teil}{endung}" for anzeige, endung in werte}
+
+
+def skript_konfigurationen(
+    maschine: dict[str, str],
+    helfer: dict[str, str],
+    plaetze: dict[str, dict[str, str]],
+    geraete_id: str,
+    getraenke: list[tuple[str, str]],
+) -> dict[str, dict[str, Any]]:
+    """Die drei Skripte: Getränk zubereiten, Lieblingsgetränk speichern, Lieblingsgetränk zubereiten.
+
+    ``maschine`` und ``helfer`` ordnen Kurznamen Entitäts-IDs zu (was fehlt, lässt das
+    Skript weg), ``plaetze`` ordnet Platzkennungen Anzeigename und die beiden Textfelder zu.
+    """
+    optionen = {kurz: (name, werte, enum) for kurz, name, werte, enum, _, _ in OPTIONEN}
+    auswahl = {anzeige: schluessel for anzeige, schluessel in getraenke}
+
+    def vorgabe(kurz: str) -> str:
+        """Der Wert aus dem Dashboard, wenn das Skript ohne diese Angabe aufgerufen wird."""
+        helfer_id = helfer.get(kurz)
+        if helfer_id:
+            return f"{{{{ {kurz} | default(states('{helfer_id}'), true) }}}}"
+        return f"{{{{ {kurz} | default('', true) }}}}"
+
+    felder: dict[str, Any] = {
+        "getraenk": {
+            "name": "Getränk",
+            "description": "Name wie auf dem Dashboard, z. B. Cappuccino. Ohne Angabe gilt die Auswahl im Dashboard.",
+            "selector": {"select": {"options": [n for n, _ in getraenke], "custom_value": True}},
+        },
+        "menge": {
+            "name": "Menge in ml",
+            "description": "0 = wie an der Maschine; wird auf den Bereich des Getränks begrenzt.",
+            "selector": {"number": {"min": 0, "max": 500, "step": 5, "unit_of_measurement": "ml"}},
+        },
+        "doppelt": {"name": "Doppelt (zwei Tassen)", "selector": {"boolean": {}}},
+    }
+    variablen: dict[str, Any] = {
+        "getraenke": auswahl,
+        "wunsch_getraenk": vorgabe("getraenk"),
+        "programm": "{{ getraenke.get(wunsch_getraenk, wunsch_getraenk) }}",
+        "wunsch_menge": (
+            f"{{{{ menge | default(states('{helfer['menge']}')) | float(0) | int }}}}"
+            if helfer.get("menge")
+            else "{{ menge | default(0) | float(0) | int }}"
+        ),
+        "wunsch_doppelt": (
+            f"{{{{ doppelt | default(is_state('{helfer['doppelt']}', 'on')) | bool(false) }}}}"
+            if helfer.get("doppelt")
+            else "{{ doppelt | default(false) | bool(false) }}"
+        ),
+    }
+    for kurz, (name, werte, enum) in optionen.items():
+        felder[kurz] = {
+            "name": name,
+            "description": f"„{WIE_MASCHINE}“ lässt die Einstellung der Maschine unangetastet.",
+            "selector": {"select": {"options": [WIE_MASCHINE] + [a for a, _ in werte]}},
+        }
+        variablen[kurz + "_werte"] = wertetabelle(werte, enum)
+        variablen["wunsch_" + kurz] = vorgabe(kurz)
+
+    ablauf: list[dict[str, Any]] = []
+    if maschine.get("fernstart"):
+        ablauf.append(
+            {
+                "if": [{"condition": "state", "entity_id": maschine["fernstart"], "state": "off"}],
+                "then": [
+                    hinweis_aktion(
+                        "Fernstart ist an der Maschine nicht erlaubt – im Menü der Maschine „Fernstart“ einschalten."
+                    ),
+                    {"stop": "Fernstart nicht erlaubt"},
+                ],
+            }
+        )
+    warten: dict[str, Any] = (
+        {
+            "wait_template": f"{{{{ is_state('{maschine['zustand']}', 'ready') }}}}",
+            "timeout": {"seconds": VORBEREITUNG_SEKUNDEN},
+            "continue_on_timeout": True,
+        }
+        if maschine.get("zustand")
+        else {"delay": {"seconds": 20}}
+    )
+    ablauf.append(
+        {
+            "if": [{"condition": "state", "entity_id": maschine["einschalter"], "state": "off"}],
+            "then": [{"action": "switch.turn_on", "target": {"entity_id": maschine["einschalter"]}}, warten],
+        }
+    )
+    ablauf.append(
+        {
+            "action": "home_connect.set_program_and_options",
+            "data": {"device_id": geraete_id, "affects_to": "selected_program", "program": "{{ programm }}"},
+        }
+    )
+    if maschine.get("gewaehlt"):
+        ablauf.append(
+            {
+                "wait_template": f"{{{{ is_state('{maschine['gewaehlt']}', programm) }}}}",
+                "timeout": {"seconds": AUSWAHL_SEKUNDEN},
+                "continue_on_timeout": True,
+            }
+        )
+    ablauf.append({"delay": {"seconds": OPTIONEN_PAUSE}})
+    for kurz in optionen:
+        entity_id = maschine.get(kurz)
+        if not entity_id:
+            continue
+        ablauf.append(
+            {
+                "if": [
+                    {
+                        "condition": "template",
+                        "value_template": (
+                            f"{{{{ wunsch_{kurz} in {kurz}_werte and {kurz}_werte[wunsch_{kurz}] in "
+                            f"(state_attr('{entity_id}', 'options') or []) }}}}"
+                        ),
+                    }
+                ],
+                "then": [
+                    {
+                        "action": "select.select_option",
+                        "target": {"entity_id": entity_id},
+                        "data": {"option": f"{{{{ {kurz}_werte[wunsch_{kurz}] }}}}"},
+                    }
+                ],
+            }
+        )
+    if maschine.get("menge"):
+        menge = maschine["menge"]
+        ablauf.append(
+            {
+                "if": [
+                    {
+                        "condition": "template",
+                        "value_template": (
+                            f"{{{{ wunsch_menge > 0 and states('{menge}') not in ['unknown', 'unavailable'] }}}}"
+                        ),
+                    }
+                ],
+                "then": [
+                    {
+                        "action": "number.set_value",
+                        "target": {"entity_id": menge},
+                        "data": {
+                            "value": (
+                                f"{{{{ [[wunsch_menge, state_attr('{menge}', 'min') | float(0)] | max, "
+                                f"state_attr('{menge}', 'max') | float(500)] | min }}}}"
+                            )
+                        },
+                    }
+                ],
+            }
+        )
+    if maschine.get("doppelt"):
+        doppelt = maschine["doppelt"]
+        ablauf.append(
+            {
+                "if": [
+                    {
+                        "condition": "template",
+                        "value_template": f"{{{{ states('{doppelt}') not in ['unknown', 'unavailable'] }}}}",
+                    }
+                ],
+                "then": [
+                    {
+                        "if": [{"condition": "template", "value_template": "{{ wunsch_doppelt }}"}],
+                        "then": [{"action": "switch.turn_on", "target": {"entity_id": doppelt}}],
+                        "else": [{"action": "switch.turn_off", "target": {"entity_id": doppelt}}],
+                    }
+                ],
+            }
+        )
+    ablauf.append({"action": "home_connect.start_selected_program", "data": {"device_id": geraete_id}})
+
+    zubereiten = {
+        "alias": "Kaffee zubereiten",
+        "icon": "mdi:coffee",
+        "mode": "single",
+        "description": (
+            "Wählt das Getränk an der Kaffeemaschine, setzt die gewünschten Optionen und startet. "
+            "Ohne Angaben gelten die Werte aus „Getränk zusammenstellen“ auf dem Dashboard."
+        ),
+        "fields": felder,
+        "variables": variablen,
+        "sequence": ablauf,
+    }
+
+    platz_feld = {
+        "platz": {
+            "name": "Platz",
+            "required": True,
+            "selector": {
+                "select": {
+                    "options": [{"label": daten["label"], "value": kennung} for kennung, daten in plaetze.items()]
+                }
+            },
+        }
+    }
+    platz_tabelle = {kennung: {"name": daten["name"], "daten": daten["daten"]} for kennung, daten in plaetze.items()}
+    werte: dict[str, Any] = {
+        "g": f"{{{{ states('{helfer['getraenk']}') }}}}" if helfer.get("getraenk") else "",
+        "m": f"{{{{ states('{helfer['menge']}') | float(0) | int }}}}" if helfer.get("menge") else 0,
+        "d": f"{{{{ is_state('{helfer['doppelt']}', 'on') }}}}" if helfer.get("doppelt") else False,
+    }
+    kuerzel = {"staerke": "s", "temperatur": "t", "milch": "mi", "intensitaet": "i", "bohnen": "b", "heisswasser": "h"}
+    for kurz, kurzform in kuerzel.items():
+        werte[kurzform] = f"{{{{ states('{helfer[kurz]}') }}}}" if helfer.get(kurz) else WIE_MASCHINE
+    beschreibung = (
+        "{% set ns = namespace(teile=[daten.g]) %}"
+        "{% if daten.s != wie %}{% set ns.teile = ns.teile + [daten.s] %}{% endif %}"
+        "{% if daten.m | int(0) > 0 %}{% set ns.teile = ns.teile + [daten.m ~ ' ml'] %}{% endif %}"
+        "{% if daten.t != wie %}{% set ns.teile = ns.teile + [daten.t] %}{% endif %}"
+        "{% if daten.mi != wie %}{% set ns.teile = ns.teile + ['Milch ' ~ daten.mi] %}{% endif %}"
+        "{% if daten.i != wie %}{% set ns.teile = ns.teile + [daten.i] %}{% endif %}"
+        "{% if daten.b != wie %}{% set ns.teile = ns.teile + ['Bohnen ' ~ daten.b] %}{% endif %}"
+        "{% if daten.h != wie %}{% set ns.teile = ns.teile + ['Wasser ' ~ daten.h] %}{% endif %}"
+        "{% if daten.d %}{% set ns.teile = ns.teile + ['doppelt'] %}{% endif %}"
+        "{{ ns.teile | join(' · ') }}"
+    )
+    speichern = {
+        "alias": "Lieblingsgetränk speichern",
+        "icon": "mdi:content-save",
+        "mode": "parallel",
+        "description": "Legt die aktuelle Zusammenstellung vom Dashboard auf einem Lieblingsgetränk-Platz ab.",
+        "fields": platz_feld,
+        "variables": {"plaetze": platz_tabelle, "wie": WIE_MASCHINE, "daten": werte},
+        "sequence": [
+            {"variables": {"beschreibung": beschreibung}},
+            {
+                "action": "input_text.set_value",
+                "target": {"entity_id": "{{ plaetze[platz].daten }}"},
+                "data": {"value": "{{ daten | to_json }}"},
+            },
+            {
+                "action": "input_text.set_value",
+                "target": {"entity_id": "{{ plaetze[platz].name }}"},
+                "data": {"value": "{{ beschreibung }}"},
+            },
+        ],
+    }
+    liebling = {
+        "alias": "Lieblingsgetränk zubereiten",
+        "icon": "mdi:coffee-to-go",
+        "mode": "single",
+        "description": "Bereitet das auf einem Platz gespeicherte Lieblingsgetränk zu.",
+        "fields": platz_feld,
+        "variables": {"plaetze": platz_tabelle, "roh": "{{ states(plaetze[platz].daten) }}"},
+        "sequence": [
+            {
+                "if": [{"condition": "template", "value_template": "{{ roh in ['', 'unknown', 'unavailable'] }}"}],
+                "then": [
+                    hinweis_aktion(
+                        "Auf diesem Platz ist noch kein Getränk gespeichert – erst „Getränk zusammenstellen“, "
+                        "dann die Taste gedrückt halten."
+                    ),
+                    {"stop": "Platz leer"},
+                ],
+            },
+            {"variables": {"f": "{{ roh | from_json }}"}},
+            {
+                "action": f"script.{SKRIPT_ZUBEREITEN}",
+                "data": {
+                    "getraenk": "{{ f.g }}",
+                    "staerke": "{{ f.s }}",
+                    "menge": "{{ f.m }}",
+                    "temperatur": "{{ f.t }}",
+                    "milch": "{{ f.mi }}",
+                    "intensitaet": "{{ f.i }}",
+                    "bohnen": "{{ f.b }}",
+                    "heisswasser": "{{ f.h }}",
+                    "doppelt": "{{ f.d }}",
+                },
+            },
+        ],
+    }
+    return {SKRIPT_ZUBEREITEN: zubereiten, SKRIPT_SPEICHERN: speichern, SKRIPT_LIEBLING: liebling}
+
+
+def kachel(entity_id: str, name: str, icon: str, farbe: str, **mehr: Any) -> dict[str, Any]:
+    return {"type": "tile", "entity": entity_id, "name": name, "icon": icon, "color": farbe, **mehr}
+
+
+def skript_taste(skript: str, platz: str, rueckfrage: dict[str, str]) -> dict[str, Any]:
+    return {
+        "action": "perform-action",
+        "perform_action": f"script.{skript}",
+        "data": {"platz": platz},
+        "confirmation": rueckfrage,
+    }
+
+
+def dashboard_konfiguration(
+    maschine_name: str,
+    maschine: dict[str, str],
+    helfer: dict[str, str],
+    plaetze_je_person: dict[str, dict[str, dict[str, str]]],
+    weitere: dict[str, tuple[str, str]],
+) -> dict[str, Any]:
+    """Das Dashboard: Lieblingsgetränke je Person, Getränk zusammenstellen, die Maschine direkt, Wartung, Zähler.
+
+    ``weitere`` ordnet translation_keys weiterer Entitäten der Maschine (Wartungshinweise,
+    Zähler) ihre Entitäts-ID und ihren Namen zu.
+    """
+    abschnitte: list[dict[str, Any]] = []
+
+    for person, plaetze in plaetze_je_person.items():
+        karten: list[dict[str, Any]] = [
+            {"type": "heading", "heading": person, "heading_style": "title", "icon": "mdi:account-circle"}
+        ]
+        for kennung, daten in plaetze.items():
+            karten.append(
+                kachel(
+                    daten["name"],
+                    daten["label"],
+                    "mdi:coffee",
+                    "amber",
+                    vertical=True,
+                    state_content="state",
+                    tap_action=skript_taste(SKRIPT_LIEBLING, kennung, TASSE),
+                    icon_tap_action=skript_taste(SKRIPT_LIEBLING, kennung, TASSE),
+                    hold_action=skript_taste(
+                        SKRIPT_SPEICHERN,
+                        kennung,
+                        {"text": f"Die aktuelle Zusammenstellung auf „{daten['label']}“ speichern?"},
+                    ),
+                    grid_options={"columns": 4, "rows": 2},
+                )
+            )
+        karten.append(
+            {
+                "type": "markdown",
+                "content": (
+                    "Tippen bereitet das Getränk zu. Gedrückt halten speichert die aktuelle "
+                    "Zusammenstellung auf dem Platz."
+                ),
+                "grid_options": {"columns": "full"},
+            }
+        )
+        abschnitte.append({"type": "grid", "cards": karten})
+
+    zusammenstellen: list[dict[str, Any]] = [
+        {
+            "type": "heading",
+            "heading": "Getränk zusammenstellen",
+            "heading_style": "title",
+            "icon": "mdi:coffee-maker",
+        }
+    ]
+    if helfer.get("getraenk"):
+        zusammenstellen.append(
+            kachel(
+                helfer["getraenk"],
+                "Getränk",
+                "mdi:coffee",
+                "brown",
+                features=[{"type": "select-options"}],
+                grid_options={"columns": "full"},
+            )
+        )
+    for kurz, name, _, _, symbol, farbe in OPTIONEN:
+        if helfer.get(kurz):
+            zusammenstellen.append(kachel(helfer[kurz], name, symbol, farbe, features=[{"type": "select-options"}]))
+    if helfer.get("menge"):
+        zusammenstellen.append(
+            kachel(
+                helfer["menge"],
+                "Menge",
+                "mdi:cup-water",
+                "blue",
+                features=[{"type": "numeric-input", "style": "slider"}],
+                grid_options={"columns": "full"},
+            )
+        )
+    if helfer.get("doppelt"):
+        zusammenstellen.append(
+            kachel(
+                helfer["doppelt"],
+                "Doppelt (zwei Tassen)",
+                "mdi:numeric-2-box-multiple",
+                "amber",
+                features=[{"type": "toggle"}],
+            )
+        )
+    zusammenstellen.append(
+        {
+            "type": "button",
+            "name": "Jetzt zubereiten",
+            "icon": "mdi:coffee",
+            "icon_height": "56px",
+            "show_state": False,
+            "tap_action": {
+                "action": "perform-action",
+                "perform_action": f"script.{SKRIPT_ZUBEREITEN}",
+                "confirmation": TASSE,
+            },
+            "grid_options": {"columns": "full", "rows": 2},
+        }
+    )
+    zusammenstellen.append(
+        {
+            "type": "markdown",
+            "content": (
+                f"„{WIE_MASCHINE}“ und Menge 0 lassen die Einstellung der Maschine unangetastet. "
+                "Was ein Getränk nicht anbietet, wird übersprungen."
+            ),
+            "grid_options": {"columns": "full"},
+        }
+    )
+    abschnitte.append({"type": "grid", "cards": zusammenstellen})
+
+    direkt: list[dict[str, Any]] = [
+        {"type": "heading", "heading": maschine_name, "heading_style": "title", "icon": "mdi:coffee-maker-outline"}
+    ]
+    direkt.append(kachel(maschine["einschalter"], "Ein / Aus", "mdi:power", "green", features=[{"type": "toggle"}]))
+    if maschine.get("kindersicherung"):
+        direkt.append(
+            kachel(maschine["kindersicherung"], "Kindersicherung", "mdi:lock", "grey", features=[{"type": "toggle"}])
+        )
+    if maschine.get("tassenwaermer"):
+        direkt.append(
+            kachel(maschine["tassenwaermer"], "Tassenwärmer", "mdi:heat-wave", "orange", features=[{"type": "toggle"}])
+        )
+    if maschine.get("zustand"):
+        direkt.append(kachel(maschine["zustand"], "Zustand", "mdi:state-machine", "brown"))
+    if maschine.get("fernstart"):
+        direkt.append(kachel(maschine["fernstart"], "Fernstart erlaubt", "mdi:remote", "teal"))
+    laufend = (
+        [{"condition": "state", "entity": maschine["zustand"], "state": LAUFEND}] if maschine.get("zustand") else []
+    )
+    if maschine.get("fortschritt"):
+        direkt.append(
+            {
+                "type": "gauge",
+                "entity": maschine["fortschritt"],
+                "name": "Fortschritt",
+                "min": 0,
+                "max": 100,
+                "severity": {"green": 0, "yellow": 50, "red": 90},
+                "visibility": laufend,
+                "grid_options": {"columns": 6, "rows": 3},
+            }
+        )
+    if maschine.get("endzeit"):
+        direkt.append(kachel(maschine["endzeit"], "Fertig um", "mdi:clock-end", "brown", visibility=laufend))
+    if maschine.get("stopp"):
+        direkt.append(
+            {
+                "type": "button",
+                "name": "Abbrechen",
+                "icon": "mdi:stop-circle",
+                "show_state": False,
+                "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {"entity_id": maschine["stopp"]},
+                },
+                "visibility": laufend,
+            }
+        )
+    if maschine.get("aktiv"):
+        direkt.append(
+            {
+                "type": "markdown",
+                "content": (
+                    "**Direkt an der Maschine.** Ein Getränk unter „Sofort starten“ startet ohne Rückfrage – "
+                    "Tasse hinstellen! Die Optionen darunter gehören zum ausgewählten Programm."
+                ),
+                "grid_options": {"columns": "full"},
+            }
+        )
+        direkt.append(
+            kachel(
+                maschine["aktiv"],
+                "Sofort starten",
+                "mdi:play-circle",
+                "red",
+                features=[{"type": "select-options"}],
+                grid_options={"columns": "full"},
+            )
+        )
+    if maschine.get("gewaehlt"):
+        direkt.append(
+            kachel(
+                maschine["gewaehlt"],
+                "Ausgewähltes Programm",
+                "mdi:format-list-bulleted",
+                "brown",
+                features=[{"type": "select-options"}],
+                grid_options={"columns": "full"},
+            )
+        )
+    for kurz, name, _, _, symbol, farbe in OPTIONEN:
+        if maschine.get(kurz):
+            direkt.append(kachel(maschine[kurz], name, symbol, farbe, features=[{"type": "select-options"}]))
+    if maschine.get("menge"):
+        direkt.append(
+            kachel(
+                maschine["menge"],
+                "Füllmenge",
+                "mdi:cup-water",
+                "blue",
+                features=[{"type": "numeric-input", "style": "slider"}],
+                grid_options={"columns": "full"},
+            )
+        )
+    if maschine.get("doppelt"):
+        direkt.append(
+            kachel(
+                maschine["doppelt"],
+                "Mehrere Getränke",
+                "mdi:numeric-2-box-multiple",
+                "amber",
+                features=[{"type": "toggle"}],
+            )
+        )
+    abschnitte.append({"type": "grid", "cards": direkt})
+
+    wartung: list[dict[str, Any]] = [
+        {"type": "heading", "heading": "Wartung", "heading_style": "title", "icon": "mdi:wrench"}
+    ]
+    zaehler: list[dict[str, Any]] = [
+        {"type": "heading", "heading": "Zähler", "heading_style": "title", "icon": "mdi:counter"}
+    ]
+    for schluessel, (entity_id, name) in sorted(weitere.items()):
+        if ZAEHLER.search(schluessel):
+            zaehler.append(kachel(entity_id, name, "mdi:counter", "brown"))
+        elif WARTUNG.search(schluessel):
+            symbol, farbe = next(
+                ((s, f) for teil, s, f in WARTUNG_SYMBOLE if teil in schluessel), ("mdi:alert-circle", "orange")
+            )
+            wartung.append(kachel(entity_id, name, symbol, farbe))
+    if len(wartung) > 1:
+        abschnitte.append({"type": "grid", "cards": wartung})
+    if len(zaehler) > 1:
+        abschnitte.append({"type": "grid", "cards": zaehler})
+
+    badges: list[dict[str, Any]] = []
+    if maschine.get("zustand"):
+        badges.append(
+            {
+                "type": "entity",
+                "entity": maschine["zustand"],
+                "name": maschine_name,
+                "show_name": True,
+                "show_state": True,
+                "show_icon": True,
+                "color": "brown",
+            }
+        )
+    badges.append(
+        {
+            "type": "entity",
+            "entity": maschine["einschalter"],
+            "name": "Strom",
+            "show_name": True,
+            "show_state": True,
+            "show_icon": True,
+            "color": "green",
+        }
+    )
+    for schluessel, (entity_id, name) in sorted(weitere.items()):
+        if WARTUNG.search(schluessel) and not ZAEHLER.search(schluessel):
+            badges.append(
+                {
+                    "type": "entity",
+                    "entity": entity_id,
+                    "name": name,
+                    "show_name": True,
+                    "show_state": False,
+                    "show_icon": True,
+                    "color": "red",
+                    "visibility": [
+                        {"condition": "state", "entity": entity_id, "state_not": ["off", "unknown", "unavailable"]}
+                    ],
+                }
+            )
+
+    return {
+        "title": maschine_name,
+        "views": [
+            {
+                "title": maschine_name,
+                "path": "kaffee",
+                "icon": "mdi:coffee",
+                "type": "sections",
+                "max_columns": 3,
+                "badges": badges,
+                "sections": abschnitte,
+            }
+        ],
+    }
+
+
+def zustaende_laden(ha: HomeAssistant, zustaende: dict[str, dict[str, Any]]) -> None:
+    zustaende.clear()
+    zustaende.update({z["entity_id"]: z for z in ha.get_json("/api/states")})
+
+
+def maschine_vorbereiten(
+    ha: HomeAssistant, maschine: dict[str, str], zustaende: dict[str, dict[str, Any]], geraete_id: str
+) -> bool:
+    """Schaltet die Maschine ein und wählt ein Milchgetränk aus (ohne zu starten).
+
+    Erst dann kennt Home Assistant die Getränkeliste und alle Optionsentitäten.
+    Gibt True zurück, wenn die Maschine dafür eingeschaltet wurde.
+    """
+    eingeschaltet = False
+    einschalter = maschine["einschalter"]
+    aktiv = maschine["aktiv"]
+    if (zustaende.get(einschalter) or {}).get("state") != "on":
+        print("  Die Kaffeemaschine wird eingeschaltet …")
+        ha.post_json("/api/services/switch/turn_on", {"entity_id": einschalter})
+        eingeschaltet = True
+    optionen: list[str] = []
+    for _ in range(VORBEREITUNG_SEKUNDEN):
+        zustand = ha.get_json(f"/api/states/{aktiv}")
+        optionen = [o for o in (zustand.get("attributes") or {}).get("options") or [] if isinstance(o, str)]
+        bereit = (
+            not maschine.get("zustand")
+            or ha.get_json(f"/api/states/{maschine['zustand']}").get("state") == "ready"
+        )
+        if optionen and bereit:
+            break
+        time.sleep(1)
+    else:
+        raise Abbruch(
+            f"Die Kaffeemaschine meldet nach {VORBEREITUNG_SEKUNDEN} Sekunden keine Getränkeliste – "
+            "ist sie am Strom, im WLAN und in Home Connect verbunden?"
+        )
+    milch = next((o for o in optionen if o.endswith("cappuccino")), optionen[0])
+    print(f"  „{getraenk_name(milch)}“ wird ausgewählt (nicht gestartet), damit alle Optionen sichtbar werden …")
+    ha.post_json(
+        "/api/services/home_connect/set_program_and_options",
+        {"device_id": geraete_id, "affects_to": "selected_program", "program": milch},
+    )
+    time.sleep(VORBEREITUNG_PAUSE)
+    return eingeschaltet
+
+
+def wartung_aktivieren(ha: HomeAssistant, entity_ids: list[str], zustaende: dict[str, dict[str, Any]]) -> None:
+    """Aktiviert deaktivierte Wartungshinweise und Zähler; ein Hinweis ohne Wert ist kein Fehler."""
+    for entity_id in entity_ids:
+        entitaet_aktivieren(ha, entity_id)
+    print(f"✓ {len(entity_ids)} Wartungshinweise/Zähler aktiviert: " + ", ".join(entity_ids))
+    try:
+        auf_zustand_warten(ha, entity_ids[0])
+    except Abbruch as fehler:
+        print(f"⚠ {fehler}")
+    zustaende_laden(ha, zustaende)
+
+
+def getraenke_einrichten(
+    ha: HomeAssistant,
+    args: argparse.Namespace,
+    zustaende: dict[str, dict[str, Any]],
+    kaffeemaschine: str,
+    interaktiv: bool,
+) -> int:
+    """Legt Helfer, Skripte und das Dashboard für die Kaffeemaschine an."""
+    if not args.personen and interaktiv:
+        args.personen = input("Für wen sollen Lieblingsgetränke angelegt werden (Namen durch Komma getrennt)? ")
+    personen = personen_lesen(args.personen)
+    register = ha.register()
+    geraet = kaffee_geraet(register, kaffeemaschine)
+    if not geraet:
+        raise Abbruch(
+            f"{kaffeemaschine} gehört zu keinem Gerät – ist die Kaffeemaschine über Home Connect eingebunden?"
+        )
+    maschine_name = register.geraetename(geraet)
+    eintraege = kaffee_entitaeten(register, kaffeemaschine)
+    maschine = bedienbare(eintraege, kaffeemaschine)
+    if not maschine.get("aktiv"):
+        raise Abbruch(
+            f"Am Gerät „{maschine_name}“ fehlt die Entität „Aktives Programm“ – das Dashboard braucht die "
+            f"Home-Connect-Integration von Home Assistant ({HOME_CONNECT_ANLEITUNG})."
+        )
+    print(f"✓ Kaffeemaschine „{maschine_name}“: {len(eintraege)} Entitäten, davon {len(maschine)} fürs Dashboard")
+
+    # Wartungshinweise (Wassertank leer, Entkalken …) sind ab Werk deaktiviert.
+    deaktiviert = sorted(
+        e["entity_id"]
+        for schluessel, e in eintraege.items()
+        if e.get("disabled_by") and (WARTUNG.search(schluessel) or ZAEHLER.search(schluessel))
+    )
+    if deaktiviert and not args.nur_anzeigen:
+        wartung_aktivieren(ha, deaktiviert, zustaende)
+        eintraege = kaffee_entitaeten(ha.register_aktualisieren(), kaffeemaschine)
+        maschine = bedienbare(eintraege, kaffeemaschine)
+
+    # Ohne eingeschaltete Maschine kennt Home Assistant weder Getränkeliste noch Optionen.
+    optionen_da = all(maschine.get(k) for k in ("staerke", "menge"))
+    getraenke_da = bool(((zustaende.get(maschine["aktiv"]) or {}).get("attributes") or {}).get("options"))
+    eingeschaltet = False
+    if not (optionen_da and getraenke_da) and not args.nur_anzeigen:
+        frage = (
+            "Home Assistant kennt noch nicht alle Getränke und Optionen der Maschine. Dafür muss sie kurz an "
+            "sein und ein Getränk ausgewählt haben (gebrüht wird nichts)."
+        )
+        if not interaktiv:
+            raise Abbruch(frage + " Bitte die Maschine einschalten und das Skript im Terminal erneut ausführen.")
+        print(f"\n{frage}")
+        if input("Kaffeemaschine jetzt einschalten und vorbereiten? [J/n]: ").strip().lower() in ("", "j", "ja", "y"):
+            eingeschaltet = maschine_vorbereiten(ha, maschine, zustaende, geraet["id"])
+            zustaende_laden(ha, zustaende)
+            eintraege = kaffee_entitaeten(ha.register_aktualisieren(), kaffeemaschine)
+            maschine = bedienbare(eintraege, kaffeemaschine)
+            fehlt = [name for kurz, name, *_ in OPTIONEN if kurz not in NUR_WENN_VORHANDEN and not maschine.get(kurz)]
+            if fehlt:
+                print(f"⚠ Diese Optionen meldet die Maschine nicht: {', '.join(fehlt)} – das Dashboard lässt sie weg.")
+        else:
+            print("  Dann gilt vorerst die Standardliste der Getränke; Optionen, die fehlen, lässt das Dashboard weg.")
+    getraenke = getraenke_liste(zustaende, maschine["aktiv"])
+    weitere = {
+        schluessel: (e["entity_id"], register.entitaetsname(e) or schluessel.replace("_", " ").capitalize())
+        for schluessel, e in eintraege.items()
+        if not e.get("disabled_by")
+        and schluessel not in MASCHINEN_SCHLUESSEL
+        and (WARTUNG.search(schluessel) or ZAEHLER.search(schluessel))
+    }
+    print(f"✓ {len(getraenke)} Getränke, {len(weitere)} Wartungshinweise und Zähler")
+
+    # Helfer: die Namen stehen fest, die Entitäts-IDs vergibt Home Assistant.
+    helfer_plan: list[tuple[str, str, str, dict[str, Any]]] = [
+        (
+            "getraenk",
+            "input_select",
+            f"{HELFER_PRAEFIX}: Getränk",
+            {"options": [n for n, _ in getraenke], "icon": "mdi:coffee"},
+        )
+    ]
+    for kurz, name, werte, _, symbol, _ in OPTIONEN:
+        if kurz in NUR_WENN_VORHANDEN and not maschine.get(kurz):
+            continue
+        helfer_plan.append(
+            (
+                kurz,
+                "input_select",
+                f"{HELFER_PRAEFIX}: {name}",
+                {"options": [WIE_MASCHINE] + [a for a, _ in werte], "icon": symbol},
+            )
+        )
+    helfer_plan.append(
+        (
+            "menge",
+            "input_number",
+            f"{HELFER_PRAEFIX}: Menge",
+            {"min": 0, "max": 500, "step": 5, "unit_of_measurement": "ml", "mode": "slider", "icon": "mdi:cup-water"},
+        )
+    )
+    helfer_plan.append(("doppelt", "input_boolean", f"{HELFER_PRAEFIX}: Doppelt", {"icon": "mdi:numeric-2-box-multiple"}))
+    plaetze_je_person: dict[str, dict[str, dict[str, str]]] = {}
+    platz_plan: list[tuple[str, str, str, str, dict[str, Any]]] = []  # Kennung, Art, Domain, Name, Felder
+    for person in personen:
+        plaetze_je_person[person] = {}
+        for nummer in range(1, args.plaetze + 1):
+            kennung = f"{slug(person)}_{nummer}"
+            plaetze_je_person[person][kennung] = {"label": f"{person} {nummer}"}
+            name = f"Lieblingsgetränk {person} {nummer}"
+            platz_plan.append((kennung, "name", "input_text", name, {"max": 255, "icon": "mdi:coffee", "initial": PLATZ_FREI}))
+            platz_plan.append((kennung, "daten", "input_text", f"{name} Daten", {"max": 255, "icon": "mdi:code-json"}))
+
+    def platz_eintragen(kennung: str, art: str, entity_id: str) -> None:
+        for plaetze in plaetze_je_person.values():
+            if kennung in plaetze:
+                plaetze[kennung][art] = entity_id
+
+    if args.nur_anzeigen:
+        helfer = {kurz: f"{domain}.{slug(name)}" for kurz, domain, name, _ in helfer_plan}
+        for kennung, art, domain, name, _ in platz_plan:
+            platz_eintragen(kennung, art, f"{domain}.{slug(name)}")
+    else:
+        ws = WebSocket(ha.url, ha.token)
+        try:
+            helfer = {kurz: helfer_anlegen(ws, domain, name, **felder) for kurz, domain, name, felder in helfer_plan}
+            for kennung, art, domain, name, felder in platz_plan:
+                platz_eintragen(kennung, art, helfer_anlegen(ws, domain, name, **felder))
+        finally:
+            ws.schliessen()
+        print(f"✓ {len(helfer_plan) + len(platz_plan)} Helfer angelegt bzw. aktualisiert")
+
+    alle_plaetze = {kennung: daten for plaetze in plaetze_je_person.values() for kennung, daten in plaetze.items()}
+    skripte = skript_konfigurationen(maschine, helfer, alle_plaetze, geraet["id"], getraenke)
+    dashboard = dashboard_konfiguration(maschine_name, maschine, helfer, plaetze_je_person, weitere)
+
+    if args.nur_anzeigen:
+        print("\nDiese Skripte würden angelegt (nichts geändert):")
+        print(json.dumps(skripte, indent=2, ensure_ascii=False))
+        print("\nUnd dieses Dashboard:")
+        print(json.dumps(dashboard, indent=2, ensure_ascii=False))
+        return 0
+
+    for kennung, config in skripte.items():
+        skript_anlegen(ha, kennung, config)
+    print("✓ 3 Skripte angelegt bzw. aktualisiert: " + ", ".join(f"script.{k}" for k in skripte))
+    ws = WebSocket(ha.url, ha.token)
+    try:
+        neu = dashboard_anlegen(ws, DASHBOARD_URL, maschine_name, dashboard)
+    finally:
+        ws.schliessen()
+    print(f"✓ Dashboard „{maschine_name}“ {'angelegt' if neu else 'aktualisiert'}: {ha.url}/{DASHBOARD_URL}")
+
+    if eingeschaltet:
+        ha.post_json("/api/services/switch/turn_off", {"entity_id": maschine["einschalter"]})
+        print("✓ Die Kaffeemaschine ist wieder ausgeschaltet.")
+    print(
+        f"\nFertig. In der Seitenleiste von Home Assistant steht jetzt „{maschine_name}“ – mit "
+        + ", ".join(f"{len(p)} Plätzen für {name}" for name, p in plaetze_je_person.items())
+        + ".\n  Tippen auf einen Platz bereitet das Getränk zu, gedrückt halten speichert die Zusammenstellung."
+        "\n  Tipp: Die drei Skripte unter Einstellungen → Sprachassistenten → Freigeben für Assist freigeben, "
+        "dann reicht „Mach Jens’ Lieblingskaffee 1“."
+    )
+    return 0
+
+
+def beispiel_konfigurationen() -> dict[str, Any]:
+    """Skripte und Dashboard mit Beispiel-IDs – für beispiele/ und die Tests."""
+    maschine = {
+        kurz: f"{domain}.konrad_{slug(name)}"
+        for kurz, domain, name in (
+            ("aktiv", "select", "Aktives Programm"),
+            ("gewaehlt", "select", "Ausgewähltes Programm"),
+            ("staerke", "select", "Bohnenmenge"),
+            ("menge", "number", "Füllmenge"),
+            ("temperatur", "select", "Kaffee-Temperatur"),
+            ("milch", "select", "Kaffee-Milch-Verhältnis"),
+            ("intensitaet", "select", "Durchflussrate"),
+            ("doppelt", "switch", "Mehrere Getränke"),
+            ("einschalter", "switch", "Einschalter"),
+            ("kindersicherung", "switch", "Kindersicherung"),
+            ("stopp", "button", "Programm stoppen"),
+            ("zustand", "sensor", "Betriebszustand"),
+            ("fortschritt", "sensor", "Programm-Fortschritt"),
+            ("endzeit", "sensor", "Programm-Endzeit"),
+            ("fernstart", "binary_sensor", "Fernstart"),
+        )
+    }
+    helfer = {
+        "getraenk": "input_select.kaffee_getrank",
+        "staerke": "input_select.kaffee_starke",
+        "temperatur": "input_select.kaffee_temperatur",
+        "milch": "input_select.kaffee_milchanteil",
+        "intensitaet": "input_select.kaffee_intensitat",
+        "menge": "input_number.kaffee_menge",
+        "doppelt": "input_boolean.kaffee_doppelt",
+    }
+    plaetze_je_person = {
+        person: {
+            f"{slug(person)}_{n}": {
+                "label": f"{person} {n}",
+                "name": f"input_text.lieblingsgetrank_{slug(person)}_{n}",
+                "daten": f"input_text.lieblingsgetrank_{slug(person)}_{n}_daten",
+            }
+            for n in range(1, STANDARD_PLAETZE + 1)
+        }
+        for person in ("Jens", "Nicole")
+    }
+    weitere = {
+        "water_tank_empty": ("sensor.konrad_wassertank_leer", "Wassertank leer"),
+        "bean_container_empty": ("sensor.konrad_bohnenbehalter_leer", "Bohnenbehälter leer"),
+        "drip_tray_full": ("sensor.konrad_tropfschale_voll", "Tropfschale voll"),
+        "device_should_be_descaled": ("sensor.konrad_entkalken_des_gerats_empfohlen", "Entkalken des Geräts empfohlen"),
+        "coffee_counter": ("sensor.konrad_kaffees", "Kaffees"),
+        "coffee_and_milk_counter": ("sensor.konrad_kaffee_und_milchtassen", "Kaffee- und Milchtassen"),
+    }
+    getraenke = [(GETRAENKE_NAMEN[k], PROGRAMM_PRAEFIX + k) for k in GETRAENKE_NAMEN]
+    alle_plaetze = {k: v for p in plaetze_je_person.values() for k, v in p.items()}
+    return {
+        "skripte": skript_konfigurationen(maschine, helfer, alle_plaetze, "GERAETE_ID_VON_KONRAD", getraenke),
+        "dashboard": dashboard_konfiguration("Konrad", maschine, helfer, plaetze_je_person, weitere),
+    }
+
+
 def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="installieren.py",
         description=(
             "Richtet die Automation „Kaffeemaschine an, wenn die Alarmanlage morgens "
-            "unscharf geschaltet wird“ in Home Assistant ein."
+            "unscharf geschaltet wird“ in Home Assistant ein – oder mit --getraenke ein "
+            "Dashboard für die Kaffeemaschine."
         ),
         add_help=False,
     )
@@ -1770,6 +2936,32 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help=(
             f"Ende des Zeitfensters, ausschließlich (Standard {STANDARD_BIS}; bei einer vorhandenen "
             "Automation deren Wert)"
+        ),
+    )
+    parser.add_argument(
+        "--getraenke",
+        action="store_true",
+        help=(
+            "Statt der Automation ein Dashboard für die Kaffeemaschine einrichten: Getränke wählen und "
+            "anpassen, Lieblingsgetränke je Person, Bedienung, Wartung und Zähler (mit --personen)"
+        ),
+    )
+    parser.add_argument(
+        "--personen",
+        metavar="NAMEN",
+        help=(
+            "Für --getraenke: wer Lieblingsgetränke bekommt, durch Komma getrennt, z. B. Jens,Nicole "
+            f"(höchstens {MAX_PERSONEN})"
+        ),
+    )
+    parser.add_argument(
+        "--plaetze",
+        type=anzahl_plaetze,
+        default=STANDARD_PLAETZE,
+        metavar="ANZAHL",
+        help=(
+            f"Für --getraenke: Plätze für Lieblingsgetränke je Person (Standard {STANDARD_PLAETZE}, "
+            f"höchstens {MAX_PLAETZE})"
         ),
     )
     parser.add_argument(
@@ -1930,6 +3122,45 @@ def dunkel_bestimmen(
     return dunkel, schwelle
 
 
+def kaffeemaschine_bestimmen(
+    ha: HomeAssistant,
+    args: argparse.Namespace,
+    zustaende: dict[str, dict[str, Any]],
+    vorhanden: dict[str, Any],
+    interaktiv: bool,
+) -> str:
+    """Der Einschalter der Kaffeemaschine: angegeben, aus der Automation übernommen oder gesucht."""
+    if args.kaffeemaschine:
+        kaffeemaschine = entitaet_bereitstellen(
+            ha, args.kaffeemaschine, zustaende, ("switch",), "--kaffeemaschine"
+        )
+    elif vorhanden.get("kaffeemaschine") in zustaende:
+        kaffeemaschine = vorhanden["kaffeemaschine"]
+    else:
+        kandidaten, deaktiviert, hinweis = kandidaten_kaffeemaschine(ha.register(), zustaende)
+        gewaehlt: list[str] = []
+        # Deaktivierte Schalter nur anbieten, wenn kein aktiver Einschalter da ist –
+        # sonst steht eine alte Steckdose neben der echten Kaffeemaschine.
+        if deaktiviert and not kandidaten:
+            hinweis = hinweis_deaktiviert(deaktiviert, "--kaffeemaschine") + "\n  " + hinweis
+            if interaktiv and len(deaktiviert) <= MAX_ANGEBOT:
+                gewaehlt = deaktivierte_anbieten(
+                    ha, deaktiviert, zustaende, "als Einschalter der Kaffeemaschine", mehrere=False
+                )
+        if not gewaehlt:
+            gewaehlt = auswaehlen(
+                kandidaten,
+                "Kein Einschalter der Kaffeemaschine",
+                "den Einschalter der Kaffeemaschine",
+                "--kaffeemaschine",
+                interaktiv,
+                hinweis,
+            )
+        [kaffeemaschine] = gewaehlt
+    print(f"✓ Kaffeemaschine: {kaffeemaschine} („{name_von(zustaende[kaffeemaschine])}“)")
+    return kaffeemaschine
+
+
 def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -> int:
     info = ha.get_json("/api/config")
     print(f"✓ Home Assistant {info.get('version')} („{info.get('location_name')}“)")
@@ -1945,6 +3176,9 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
     # Eine vorhandene Automation gibt die Einstellungen vor – ein zweiter Aufruf
     # (z. B. nur mit --licht) soll nicht alles neu erfragen.
     vorhanden = uebernehmen(vorhandene_automation(ha) or {})
+    if args.getraenke:
+        kaffeemaschine = kaffeemaschine_bestimmen(ha, args, zustaende, vorhanden, interaktiv)
+        return getraenke_einrichten(ha, args, zustaende, kaffeemaschine, interaktiv)
     if vorhanden:
         print(
             f"✓ Die Automation „{ALIAS}“ gibt es schon – Alarmanlage, Kaffeemaschine und Zeitfenster "
@@ -1995,34 +3229,7 @@ def _einrichten(ha: HomeAssistant, args: argparse.Namespace, interaktiv: bool) -
         + f", unscharf = „{unscharf}“"
     )
 
-    if args.kaffeemaschine:
-        kaffeemaschine = entitaet_bereitstellen(
-            ha, args.kaffeemaschine, zustaende, ("switch",), "--kaffeemaschine"
-        )
-    elif vorhanden.get("kaffeemaschine") in zustaende:
-        kaffeemaschine = vorhanden["kaffeemaschine"]
-    else:
-        kandidaten, deaktiviert, hinweis = kandidaten_kaffeemaschine(ha.register(), zustaende)
-        gewaehlt: list[str] = []
-        # Deaktivierte Schalter nur anbieten, wenn kein aktiver Einschalter da ist –
-        # sonst steht eine alte Steckdose neben der echten Kaffeemaschine.
-        if deaktiviert and not kandidaten:
-            hinweis = hinweis_deaktiviert(deaktiviert, "--kaffeemaschine") + "\n  " + hinweis
-            if interaktiv and len(deaktiviert) <= MAX_ANGEBOT:
-                gewaehlt = deaktivierte_anbieten(
-                    ha, deaktiviert, zustaende, "als Einschalter der Kaffeemaschine", mehrere=False
-                )
-        if not gewaehlt:
-            gewaehlt = auswaehlen(
-                kandidaten,
-                "Kein Einschalter der Kaffeemaschine",
-                "den Einschalter der Kaffeemaschine",
-                "--kaffeemaschine",
-                interaktiv,
-                hinweis,
-            )
-        [kaffeemaschine] = gewaehlt
-    print(f"✓ Kaffeemaschine: {kaffeemaschine} („{name_von(zustaende[kaffeemaschine])}“)")
+    kaffeemaschine = kaffeemaschine_bestimmen(ha, args, zustaende, vorhanden, interaktiv)
     if not verfuegbar(kaffeemaschine, zustaende):
         print(
             f"⚠ {kaffeemaschine} ist zurzeit nicht verfügbar – Home Assistant erreicht die Maschine "
