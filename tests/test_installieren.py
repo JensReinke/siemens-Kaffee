@@ -2957,7 +2957,7 @@ async def test_dashboard_wird_angelegt_und_bereitet_zu(
 
     # Helfer
     getraenk = home_assistant.states.get(GETRAENK)
-    assert getraenk.attributes["options"][:3] == ["Espresso", "Espresso Doppio", "Kaffee"]
+    assert getraenk.attributes["options"][:3] == ["Espresso", "Espresso Doppio", "Caffè Crema"]  # wie am Display
     assert len(getraenk.attributes["options"]) == 33
     assert home_assistant.states.get(STAERKE).attributes["options"][:2] == [installieren.WIE_MASCHINE, "sehr mild"]
     assert home_assistant.states.get("input_select.kaffee_temperatur").attributes["options"][1] == "88 °C"
@@ -3278,6 +3278,16 @@ def test_slug_wie_home_assistant(name: str) -> None:
     assert installieren.slug(name) == slugify(name)
 
 
+def test_alte_getraenkenamen_gelten_weiter() -> None:
+    """„Kaffee“ heißt jetzt wie am Display „Caffè Crema“ – ein damit gespeichertes Lieblingsgetränk läuft weiter."""
+    getraenke = installieren.beispiel_konfigurationen()["skripte"][installieren.SKRIPT_ZUBEREITEN]["variables"]["getraenke"]
+    kaffee = installieren.PROGRAMM_PRAEFIX + "beverage_coffee"
+    assert getraenke["Caffè Crema"] == getraenke["Kaffee"] == kaffee
+    assert getraenke["Milchkaffee"] == getraenke["Caffè Latte"] == installieren.PROGRAMM_PRAEFIX + "beverage_caffe_latte"
+    assert getraenke["Caffè XL"] == getraenke["XL-Kaffee"] == installieren.PROGRAMM_PRAEFIX + "beverage_x_l_coffee"
+    assert "Kaffee" not in [n for n, _ in installieren.getraenke_liste({}, None)]  # nur im Skript, nicht in der Auswahl
+
+
 def test_getraenke_liste() -> None:
     zustaende = {
         AKTIV: {"attributes": {"options": [CAPPUCCINO, ESPRESSO, installieren.PROGRAMM_PRAEFIX + "cleaning_modes_rinse",
@@ -3317,14 +3327,17 @@ def test_zeichnung_animiert_je_zustand() -> None:
     brueht = installieren.konrad_svg("brueht")
     assert brueht.count("stroke-dashoffset") == 2  # zwei Kaffeestrahlen
     assert brueht.count("animateTransform") == 3  # drei Dampfschwaden
-    assert 'attributeName="height" values="0;50"' in brueht  # die Tasse füllt sich
+    assert 'attributeName="height" values="0;54"' in brueht  # das Glas füllt sich
+    assert 'attributeName="width" values="0;288"' in brueht  # der Fortschrittsbalken auf dem Bildschirm läuft
     fertig = installieren.konrad_svg("fertig")
     assert "stroke-dashoffset" not in fertig and "animateTransform" in fertig
-    assert 'height="50" fill="#5d3a1a"' in fertig
+    assert 'height="54" fill="#5d3a1a"' in fertig
     aus = installieren.konrad_svg("aus")
     assert "<animate" not in aus and "animateTransform" not in aus
     assert 'attributeName="opacity" values="1;.25;1"' in installieren.konrad_svg("achtung")  # Warndreieck blinkt
-    assert 'values="1;.3;1"' in installieren.konrad_svg("bereit")  # die Starttaste atmet
+    assert 'values="1;.3;1"' in installieren.konrad_svg("bereit")  # die Start-Taste auf dem Bildschirm atmet
+    assert ">KONRAD<" in installieren.konrad_svg("bereit")  # der Schriftzug trägt den Namen der Maschine
+    assert ">Barista<" in installieren.konrad_svg("bereit") and ">Comfort<" in installieren.konrad_svg("aus")
 
 
 def test_kopfkarte_deckt_alle_betriebszustaende_ab() -> None:
@@ -3348,15 +3361,26 @@ def test_kopfkarte_deckt_alle_betriebszustaende_ab() -> None:
     assert bild["filter"] == "none" and bild["aspect_ratio"] == "12x5"
     assert bild["style"] == {"left": "50%", "top": "50%", "width": "100%"}
     assert einschalter["entity"] == "switch.konrad_einschalter" and einschalter["tap_action"] == {"action": "toggle"}
-    assert einschalter["style"]["left"] == "11.7%" and einschalter["style"]["top"] == "22.4%"
+    assert einschalter["style"]["left"] == "12.5%" and einschalter["style"]["top"] == "44.0%"
     assert tasse["tap_action"]["perform_action"] == "script.kaffee_zubereiten"
     assert tasse["tap_action"]["confirmation"] == installieren.TASSE
-    # Programmname und Fortschritt nur, während ein Getränk läuft; Hinweise nur, wenn sie anliegen.
+    # Im Bildschirmkopf das laufende, sonst das ausgewählte Programm; Fortschritt nur, während ein
+    # Getränk läuft; Hinweise nur, wenn sie anliegen.
     bedingte = [e for e in weitere if e["type"] == "conditional"]
-    assert len(bedingte) == len(weitere) == 2 + 4  # Programm, Fortschritt, 4 Wartungshinweise im Beispiel
+    assert len(bedingte) == len(weitere) == 3 + 4  # 2× Programm, Fortschritt, 4 Wartungshinweise im Beispiel
     assert bedingte[0]["conditions"] == [{"entity": "sensor.konrad_betriebszustand", "state": "run"}]
     assert bedingte[0]["elements"][0]["entity"] == "select.konrad_aktives_programm"
-    assert bedingte[1]["elements"][0]["prefix"] == "Fortschritt "
+    assert bedingte[0]["elements"][0]["style"]["left"] == "27.5%"  # Kopfzeile des Bildschirms
+    assert bedingte[1]["conditions"] == [
+        {"entity": "sensor.konrad_betriebszustand", "state_not": "run"},
+        {"entity": "sensor.konrad_betriebszustand", "state_not": "inactive"},
+        {"entity": "sensor.konrad_betriebszustand", "state_not": "unknown"},
+        {"entity": "sensor.konrad_betriebszustand", "state_not": "unavailable"},
+        {"entity": "select.konrad_ausgewahltes_programm", "state_not": "unknown"},
+        {"entity": "select.konrad_ausgewahltes_programm", "state_not": "unavailable"},
+    ]
+    assert bedingte[1]["elements"][0]["entity"] == "select.konrad_ausgewahltes_programm"
+    assert bedingte[2]["elements"][0]["prefix"] == "Fortschritt "
     wassertank = next(e for e in bedingte if e["elements"][0].get("icon") == "mdi:water-alert")
     assert wassertank["conditions"] == [
         {"entity": "sensor.konrad_wassertank_leer", "state_not": "off"},
@@ -3364,7 +3388,7 @@ def test_kopfkarte_deckt_alle_betriebszustaende_ab() -> None:
         {"entity": "sensor.konrad_wassertank_leer", "state_not": "unavailable"},
     ]
     assert wassertank["elements"][0]["tap_action"] == {"action": "more-info"}
-    assert {e["elements"][0]["icon"] for e in bedingte[2:]} == {
+    assert {e["elements"][0]["icon"] for e in bedingte[3:]} == {
         "mdi:water-alert", "mdi:seed-off", "mdi:tray-alert", "mdi:water-off"
     }
 

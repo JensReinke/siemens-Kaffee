@@ -141,17 +141,20 @@ legt in Home Assistant ein eigenes Dashboard an – in der Seitenleiste unter de
 Namen der Maschine (z. B. „Konrad“, Symbol Kaffeetasse) – mit allem, was sich
 über Home Connect bedienen lässt:
 
-- **Die Maschine selbst**: ganz oben eine gezeichnete Front des Vollautomaten
-  (stilisiert, kein Foto), die den Betriebszustand zeigt und sich bewegt: aus,
-  bereit (die Starttaste atmet), brüht (Kaffee läuft aus beiden Öffnungen ins
-  Glas, Dampf steigt auf, der Fortschrittsbalken läuft), fertig, Achtung
-  (Warndreieck blinkt), Störung. Während ein Getränk läuft, stehen Programm und
-  Fortschritt daneben; liegt ein Wartungshinweis an, erscheint eine rote
-  Markierung an der betroffenen Stelle (Wassertank, Bohnen, Tropfschale,
-  Bildschirm). Die Ein/Aus-Taste der Zeichnung schaltet die Maschine, ein Tipp
-  auf das Glas startet „Jetzt zubereiten“. Die Bilder stecken als SVG direkt in
-  der Dashboard-Konfiguration, es braucht keine Zusatzkarten und keine Dateien
-  auf dem Home-Assistant-Rechner ([`beispiele/bilder/`](beispiele/bilder/)).
+- **Die Maschine selbst**: ganz oben eine nach Fotos eines EQ900 plus gezeichnete
+  Front (stilisiert, kein Foto): schwarze Glasfront mit dem Bildschirm im Stil der
+  Maschine, Tastenleiste und Schriftzug mit dem Namen der Maschine, darunter
+  Edelstahl mit Auslauf, Glas und Tropfgitter. Sie zeigt den Betriebszustand und
+  bewegt sich: aus, bereit (die Start-Taste atmet), brüht (Kaffee läuft aus
+  beiden Düsen ins Glas, Dampf steigt auf, der Fortschrittsbalken läuft), fertig,
+  Achtung (Warndreieck blinkt), Störung. Im Bildschirmkopf steht wie an der
+  Maschine das laufende bzw. ausgewählte Programm, daneben der Fortschritt.
+  Liegt ein Wartungshinweis an, erscheint eine rote Markierung an der
+  betroffenen Stelle (Wassertank, Bohnen, Tropfschale, Bildschirm). Die
+  Ein/Aus-Taste der Zeichnung schaltet die Maschine, ein Tipp auf das Glas
+  startet „Jetzt zubereiten“. Die Bilder stecken als SVG direkt in der
+  Dashboard-Konfiguration, es braucht keine Zusatzkarten und keine Dateien auf
+  dem Home-Assistant-Rechner ([`beispiele/bilder/`](beispiele/bilder/)).
 - **Lieblingsgetränke je Person**: drei Plätze für jede angegebene Person
   (`--plaetze` ändert die Anzahl, höchstens fünf). **Tippen** bereitet das
   gespeicherte Getränk zu – nach der Rückfrage „Steht eine Tasse unter dem
@@ -159,7 +162,8 @@ Namen der Maschine (z. B. „Konrad“, Symbol Kaffeetasse) – mit allem, was s
   dem Platz; die Kachel zeigt sie dann an („Cappuccino · stark · 180 ml ·
   doppelt“).
 - **Getränk zusammenstellen**: alle Getränke, die die Maschine meldet (bei
-  Konrad 33, vom Espresso bis zum Dead Eye), dazu Stärke, Temperatur,
+  Konrad 32, vom Espresso bis zum Dead Eye), benannt wie auf ihrem Display
+  (Caffè Crema, Caffè XL, Milchkaffee …), dazu Stärke, Temperatur,
   Milchanteil, Intensität (Durchflussrate), Menge in ml und „Doppelt“ für zwei
   Tassen – bei Maschinen mit zwei Bohnenbehältern oder Heißwasser-Temperatur
   auch diese. „wie an der Maschine“ und Menge 0 lassen die Einstellung der

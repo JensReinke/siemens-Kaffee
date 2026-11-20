@@ -23,12 +23,12 @@ kaffee_zubereiten:
           options:
           - Espresso
           - Espresso Doppio
-          - Kaffee
+          - Caffè Crema
           - Caffè Grande
-          - XL-Kaffee
+          - Caffè XL
           - Cappuccino
           - Latte Macchiato
-          - Caffè Latte
+          - Milchkaffee
           - Milchschaum
           - Warme Milch
           - Heißwasser
@@ -173,12 +173,12 @@ kaffee_zubereiten:
     getraenke:
       Espresso: consumer_products_coffee_maker_program_beverage_espresso
       Espresso Doppio: consumer_products_coffee_maker_program_beverage_espresso_doppio
-      Kaffee: consumer_products_coffee_maker_program_beverage_coffee
+      Caffè Crema: consumer_products_coffee_maker_program_beverage_coffee
       Caffè Grande: consumer_products_coffee_maker_program_beverage_caffe_grande
-      XL-Kaffee: consumer_products_coffee_maker_program_beverage_x_l_coffee
+      Caffè XL: consumer_products_coffee_maker_program_beverage_x_l_coffee
       Cappuccino: consumer_products_coffee_maker_program_beverage_cappuccino
       Latte Macchiato: consumer_products_coffee_maker_program_beverage_latte_macchiato
-      Caffè Latte: consumer_products_coffee_maker_program_beverage_caffe_latte
+      Milchkaffee: consumer_products_coffee_maker_program_beverage_caffe_latte
       Milchschaum: consumer_products_coffee_maker_program_beverage_milk_froth
       Warme Milch: consumer_products_coffee_maker_program_beverage_warm_milk
       Heißwasser: consumer_products_coffee_maker_program_beverage_hot_water
@@ -206,6 +206,9 @@ kaffee_zubereiten:
       Dead Eye: consumer_products_coffee_maker_program_coffee_world_dead_eye
       Cold Brew: consumer_products_coffee_maker_program_coffee_world_cold_brew
       Cold Brew Macchiato: consumer_products_coffee_maker_program_coffee_world_cold_brew_macchiato
+      Kaffee: consumer_products_coffee_maker_program_beverage_coffee
+      XL-Kaffee: consumer_products_coffee_maker_program_beverage_x_l_coffee
+      Caffè Latte: consumer_products_coffee_maker_program_beverage_caffe_latte
     wunsch_getraenk: '{{ getraenk | default(states(''input_select.kaffee_getrank''), true) }}'
     programm: '{{ getraenke.get(wunsch_getraenk, wunsch_getraenk) }}'
     wunsch_menge: '{{ menge | default(states(''input_number.kaffee_menge'')) | float(0) | int }}'

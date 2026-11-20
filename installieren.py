@@ -49,6 +49,7 @@ import datetime
 import getpass
 import hashlib
 import json
+import math
 import os
 import re
 import socket
@@ -1723,12 +1724,12 @@ SKRIPT_SEKUNDEN = 10  # so lange wartet das Skript, bis ein gespeichertes Skript
 GETRAENKE_NAMEN = {
     "beverage_espresso": "Espresso",
     "beverage_espresso_doppio": "Espresso Doppio",
-    "beverage_coffee": "Kaffee",
+    "beverage_coffee": "Caffè Crema",
     "beverage_caffe_grande": "Caffè Grande",
-    "beverage_x_l_coffee": "XL-Kaffee",
+    "beverage_x_l_coffee": "Caffè XL",
     "beverage_cappuccino": "Cappuccino",
     "beverage_latte_macchiato": "Latte Macchiato",
-    "beverage_caffe_latte": "Caffè Latte",
+    "beverage_caffe_latte": "Milchkaffee",
     "beverage_milk_froth": "Milchschaum",
     "beverage_warm_milk": "Warme Milch",
     "beverage_hot_water": "Heißwasser",
@@ -1757,6 +1758,8 @@ GETRAENKE_NAMEN = {
     "coffee_world_cold_brew": "Cold Brew",
     "coffee_world_cold_brew_macchiato": "Cold Brew Macchiato",
 }
+# Frühere Namen – gespeicherte Lieblingsgetränke und Sprachbefehle mit ihnen gelten weiter.
+ALTE_NAMEN = {"Kaffee": "beverage_coffee", "XL-Kaffee": "beverage_x_l_coffee", "Caffè Latte": "beverage_caffe_latte"}
 # Auswahlwerte: (Anzeige, Endung des Home-Connect-Schlüssels)
 STAERKEN = [
     ("sehr mild", "very_mild"), ("mild", "mild"), ("mild+", "mild_plus"), ("normal", "normal"),
@@ -1990,6 +1993,9 @@ def skript_konfigurationen(
     """
     optionen = {kurz: (name, werte, enum) for kurz, name, werte, enum, _, _ in OPTIONEN}
     auswahl = {anzeige: schluessel for anzeige, schluessel in getraenke}
+    auswahl.update(
+        {alt: PROGRAMM_PRAEFIX + kurz for alt, kurz in ALTE_NAMEN.items() if PROGRAMM_PRAEFIX + kurz in auswahl.values()}
+    )
 
     def vorgabe(kurz: str) -> str:
         """Der Wert aus dem Dashboard, wenn das Skript ohne diese Angabe aufgerufen wird."""
@@ -2259,7 +2265,7 @@ def skript_konfigurationen(
 
 BILD_BREITE, BILD_HOEHE = 1200, 500  # Seitenverhältnis 12:5
 SCHRIFT = "-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
-FUELLDAUER = "22s"  # so lange „braucht“ die gezeichnete Tasse, bis sie voll ist (Schleife)
+FUELLDAUER = "22s"  # so lange „braucht“ das gezeichnete Glas, bis es voll ist (Schleife)
 BILD_VARIANTEN = {  # Variante → (Statuszeile, Untertitel, Farbe der Statuszeile)
     "aus": ("Aus", "Zum Einschalten auf die Taste tippen", "#9e9e9e"),
     "bereit": ("Bereit", "Tasse hinstellen und Getränk wählen", "#43a047"),
@@ -2280,24 +2286,27 @@ ZUSTAND_BILDER = {  # Betriebszustand von Home Connect → Variante
     "error": "fehler",
 }
 UNBEKANNT_FILTER = "grayscale(100%) opacity(45%)"
-MARKIERUNGEN = (  # translation_key → Symbol und Stelle in der Zeichnung, wenn der Hinweis anliegt
-    ("water_tank_empty", "mdi:water-alert", (487, 275)),
-    ("bean_container_empty", "mdi:seed-off", (310, 48)),
-    ("drip_tray_full", "mdi:tray-alert", (310, 441)),
-    ("keep_milk_tank_cool", "mdi:cup-off", (356, 322)),
-    ("device_should_be_descaled", "mdi:water-off", (430, 112)),
-    ("device_descaling_overdue", "mdi:water-off", (430, 112)),
-    ("device_descaling_blockage", "mdi:water-off", (430, 112)),
-    ("device_should_be_calc_n_cleaned", "mdi:spray-bottle", (190, 112)),
-    ("device_calc_n_clean_overdue", "mdi:spray-bottle", (190, 112)),
-    ("device_calc_n_clean_blockage", "mdi:spray-bottle", (190, 112)),
-    ("device_should_be_cleaned", "mdi:broom", (190, 252)),
-    ("device_cleaning_overdue", "mdi:broom", (190, 252)),
+# Stellen in der Zeichnung (Koordinaten der 1200×500-Fläche)
+MARKIERUNGEN = (  # translation_key → Symbol und Stelle, wenn der Hinweis anliegt
+    ("water_tank_empty", "mdi:water-alert", (66, 245)),  # Griff des Wassertanks links
+    ("bean_container_empty", "mdi:seed-off", (330, 24)),  # Oberkante der Glasfront (Bohnen sitzen oben)
+    ("drip_tray_full", "mdi:tray-alert", (330, 458)),  # Tropfgitter
+    ("keep_milk_tank_cool", "mdi:cup-off", (398, 300)),  # rechts am Auslauf
+    ("device_should_be_descaled", "mdi:water-off", (484, 50)),  # Bildschirm oben rechts
+    ("device_descaling_overdue", "mdi:water-off", (484, 50)),
+    ("device_descaling_blockage", "mdi:water-off", (484, 50)),
+    ("device_should_be_calc_n_cleaned", "mdi:spray-bottle", (176, 50)),  # Bildschirm oben links
+    ("device_calc_n_clean_overdue", "mdi:spray-bottle", (176, 50)),
+    ("device_calc_n_clean_blockage", "mdi:spray-bottle", (176, 50)),
+    ("device_should_be_cleaned", "mdi:broom", (176, 192)),  # Bildschirm unten links
+    ("device_cleaning_overdue", "mdi:broom", (176, 192)),
 )
-EINSCHALTER_STELLE = (140, 112)
-TASSE_STELLE = (310, 410)
+EINSCHALTER_STELLE = (150, 220)  # die Ein/Aus-Taste der Tastenleiste
+TASSE_STELLE = (330, 392)  # das Glas unter dem Auslauf
+ANZEIGE_STELLE = (330, 64)  # Kopfzeile des Bildschirms: dort steht das Programm wie an der Maschine
 SYMBOLGROESSE = "clamp(14px, 2vw, 32px)"
 SCHRIFTGROESSE = "clamp(11px, 1.8vw, 28px)"
+ANZEIGE_SCHRIFT = "clamp(7px, 1.1vw, 15px)"
 # Leeres Grundbild der Karte (gibt nur das Seitenverhältnis vor – sonst schiene es unter dem Zustandsbild durch)
 LEERES_BILD = "data:image/svg+xml;base64," + base64.b64encode(
     b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 500' width='1200' height='500'/>"
@@ -2311,172 +2320,220 @@ def bild_uri(svg: str) -> str:
     return "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode()
 
 
-def _display(variante: str) -> str:
-    """Der Inhalt des Bildschirms je Variante (Bildschirm: x 190–430, y 112–252, Mitte 310/182)."""
-    text = f'font-family="{SCHRIFT}" text-anchor="middle" fill="#e3f2fd" font-weight="600"'
-    if variante == "aus":
-        return '<path d="M206 124 h52 l-30 116 h-22 z" fill="#ffffff" opacity=".035"/>'
-    if variante == "bereit":
-        return (
-            '<path d="M292 142 h36 v20 a18 18 0 0 1 -36 0 z" fill="#e3f2fd"/>'
-            '<path d="M330 148 h8 a8 8 0 0 1 0 16 h-8" fill="none" stroke="#e3f2fd" stroke-width="4"/>'
-            f'<text x="310" y="226" font-size="28" {text}>Bereit</text>'
-        )
-    if variante == "brueht":
-        return (
-            f'<text x="310" y="178" font-size="30" {text}>Brüht</text>'
-            '<rect x="220" y="200" width="180" height="12" rx="6" fill="#0a2a4f"/>'
-            '<rect x="220" y="200" width="0" height="12" rx="6" fill="#64b5f6">'
-            f'<animate attributeName="width" values="0;180" dur="{FUELLDAUER}" repeatCount="indefinite"/></rect>'
-        )
-    if variante == "fertig":
-        return (
-            f'<text x="310" y="172" font-size="30" {text}>Fertig</text>'
-            '<path d="M284 206 l16 16 l34 -34" fill="none" stroke="#a5d6a7" stroke-width="7" '
-            'stroke-linecap="round" stroke-linejoin="round"/>'
-        )
-    if variante == "achtung":
-        return (
-            '<g><path d="M310 130 L354 208 L266 208 z" fill="#ffd54f" stroke="#6d4c00" stroke-width="4" '
-            'stroke-linejoin="round"/>'
-            f'<text x="310" y="198" font-size="44" font-family="{SCHRIFT}" text-anchor="middle" '
-            'fill="#6d4c00" font-weight="700">!</text>'
-            '<animate attributeName="opacity" values="1;.25;1" dur="1.4s" repeatCount="indefinite"/></g>'
-            f'<text x="310" y="240" font-size="22" {text}>Bitte nachsehen</text>'
-        )
-    return (  # fehler
-        f'<text x="310" y="172" font-size="30" {text}>Fehler</text>'
-        '<path d="M292 192 l36 36 M328 192 l-36 36" stroke="#ef9a9a" stroke-width="7" stroke-linecap="round"/>'
+def _stern(cx: float, cy: float, aussen: float, innen: float) -> str:
+    punkte = []
+    for k in range(10):
+        r = aussen if k % 2 == 0 else innen
+        winkel = math.radians(-90 + k * 36)
+        punkte.append(f"{cx + r * math.cos(winkel):.1f},{cy + r * math.sin(winkel):.1f}")
+    return " ".join(punkte)
+
+
+def _tastenleiste(an: bool) -> str:
+    """Die Tastenleiste unter dem Bildschirm, wie an der Maschine: Ein/Aus, Barista/Comfort, Tassen, Stern, Pflege, Einstellungen."""
+    farbe = "#cfd8dc" if an else "#4a5057"
+    linie = f'fill="none" stroke="{farbe}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
+    zacken = "".join(
+        f'<path d="M{530 + 6.5 * math.cos(math.radians(w)):.1f} {220 + 6.5 * math.sin(math.radians(w)):.1f} '
+        f'L{530 + 9 * math.cos(math.radians(w)):.1f} {220 + 9 * math.sin(math.radians(w)):.1f}" {linie}/>'
+        for w in range(0, 360, 45)
+    )
+    return (
+        # Ein/Aus (das Dashboard legt die tippbare Taste darüber)
+        f'<path d="M144.3 214.3 a8 8 0 1 0 11.4 0" {linie}/><path d="M150 211 v8" {linie}/>'
+        # Barista / Comfort
+        f'<text x="235" y="217" font-size="8" fill="{farbe}" font-family="{SCHRIFT}" text-anchor="middle">Barista</text>'
+        f'<path d="M223 219.5 h24" stroke="{farbe}" stroke-width=".8"/>'
+        f'<text x="235" y="228" font-size="8" fill="{farbe}" font-family="{SCHRIFT}" text-anchor="middle">Comfort</text>'
+        # zwei Tassen
+        f'<path d="M311 214 h9 v8 a4.5 4.5 0 0 1 -9 0 z M320 216 h3 a2.5 2.5 0 0 1 0 5 h-3" {linie}/>'
+        f'<path d="M323 212 h9 v8 a4.5 4.5 0 0 1 -9 0 z M332 214 h3 a2.5 2.5 0 0 1 0 5 h-3" {linie}/>'
+        # Stern (Lieblingsgetränke)
+        f'<polygon points="{_stern(395, 220, 7.5, 3.2)}" {linie}/>'
+        # Pflege (Tropfen mit Funkeln)
+        f'<path d="M459 211 q6 8 6 11.5 a6 6 0 0 1 -12 0 q0 -3.5 6 -11.5 z" {linie}/>'
+        f'<path d="M469 210 l1.3 2.7 l2.7 1.3 l-2.7 1.3 l-1.3 2.7 l-1.3 -2.7 l-2.7 -1.3 l2.7 -1.3 z" fill="{farbe}"/>'
+        # Einstellungen (Zahnrad)
+        f'<circle cx="530" cy="220" r="6.5" {linie}/><circle cx="530" cy="220" r="2" fill="{farbe}"/>{zacken}'
     )
 
 
-def konrad_svg(variante: str, name: str = "Konrad") -> str:
-    """Die Front eines Siemens-Vollautomaten (stilisiert) als SVG – animiert je nach Zustand.
+def _display(variante: str) -> str:
+    """Der Bildschirm (x 180–480, y 48–193) im Stil der Maschine: blauer Kopf, Tasse auf heller Theke, Start-Taste.
 
-    Links die Maschine mit Bohnenbehältern, Bildschirm, Tasten, Auslauf, Glas auf dem
-    Tropfgitter und Wassertank, rechts Name, Statuszeile und Untertitel. Die Animationen
-    (SMIL) laufen auch, wenn das Bild als <img> eingebunden ist.
+    Die Kopfzeile bleibt frei – dort legt das Dashboard das Programm als Beschriftung hinein.
+    """
+    text = f'font-family="{SCHRIFT}" text-anchor="middle" font-weight="600"'
+    if variante == "aus":
+        return (
+            '<rect x="180" y="48" width="300" height="145" rx="4" fill="#06080c"/>'
+            '<path d="M190 56 h70 l-44 129 h-26 z" fill="#ffffff" opacity=".03"/>'
+        )
+    kopf = {"achtung": "url(#ui_amber)", "fehler": "url(#ui_rot)"}.get(variante, "url(#ui_blau)")
+    knopf, knopf_farbe = {
+        "brueht": ("Stopp", "#c62828"),
+        "achtung": ("OK", "#1a6fd0"),
+        "fehler": ("OK", "#c62828"),
+    }.get(variante, ("Start", "#1a6fd0"))
+    teile = [
+        f'<rect x="180" y="48" width="300" height="88" fill="{kopf}"/>',
+        '<rect x="180" y="136" width="300" height="57" fill="url(#ui_theke)"/>',
+        '<rect x="438" y="55" width="34" height="11" rx="2" fill="#e3f2fd" opacity=".92"/>',
+        f'<text x="455" y="63.5" font-size="7.5" fill="#1c4fb1" {text}>Barista</text>',
+    ]
+    if variante in ("bereit", "brueht", "fertig"):
+        teile.append(
+            '<ellipse cx="300" cy="150" rx="36" ry="8" fill="#f7f7f7" stroke="#cfd8dc" stroke-width="1"/>'
+            '<path d="M274 112 h52 v24 a26 14 0 0 1 -52 0 z" fill="#fafafa" stroke="#cfd8dc" stroke-width="1"/>'
+            '<path d="M326 118 q16 0 16 10 q0 10 -16 10" fill="none" stroke="#fafafa" stroke-width="5"/>'
+            '<path d="M326 118 q16 0 16 10 q0 10 -16 10" fill="none" stroke="#cfd8dc" stroke-width="1"/>'
+            '<ellipse cx="300" cy="112" rx="26" ry="7" fill="#ffffff" stroke="#cfd8dc" stroke-width="1"/>'
+            '<ellipse cx="300" cy="112" rx="21" ry="5" fill="#c58a4a"/>'
+        )
+    if variante == "brueht":
+        teile.append('<rect x="186" y="168" width="288" height="5" rx="2.5" fill="#c9d3de"/>')
+        teile.append(
+            '<rect x="186" y="168" width="0" height="5" rx="2.5" fill="#1a6fd0">'
+            f'<animate attributeName="width" values="0;288" dur="{FUELLDAUER}" repeatCount="indefinite"/></rect>'
+        )
+    if variante == "fertig":
+        teile.append(
+            '<circle cx="432" cy="104" r="16" fill="#2e7d32"/>'
+            '<path d="M423 104 l6 6 l12 -13" fill="none" stroke="#ffffff" stroke-width="3.5" '
+            'stroke-linecap="round" stroke-linejoin="round"/>'
+        )
+    if variante == "achtung":
+        teile.append(
+            '<g><path d="M300 70 L330 122 L270 122 z" fill="#ffd54f" stroke="#6d4c00" stroke-width="3" '
+            'stroke-linejoin="round"/>'
+            f'<text x="300" y="115" font-size="30" fill="#6d4c00" {text}>!</text>'
+            '<animate attributeName="opacity" values="1;.25;1" dur="1.4s" repeatCount="indefinite"/></g>'
+        )
+    if variante == "fehler":
+        teile.append(
+            '<path d="M284 78 l32 32 M316 78 l-32 32" stroke="#ffcdd2" stroke-width="6" stroke-linecap="round"/>'
+        )
+    teile.append('<rect x="180" y="176" width="300" height="17" fill="#e3e6ea"/>')
+    teile.append(f'<text x="214" y="188" font-size="6.5" fill="#6b7682" font-family="{SCHRIFT}">Im Profil speichern</text>')
+    teile.append('<path d="M248 178 v13 M290 178 v13" stroke="#cfd5db" stroke-width="1"/>')
+    puls = (
+        '<animate attributeName="opacity" values="1;.3;1" dur="2.4s" repeatCount="indefinite"/>'
+        if variante == "bereit"
+        else ""
+    )
+    teile.append(f'<rect x="400" y="176" width="80" height="17" fill="{knopf_farbe}">{puls}</rect>')
+    teile.append(f'<text x="440" y="188" font-size="8" fill="#ffffff" {text}>{knopf}</text>')
+    return "".join(teile)
+
+
+def konrad_svg(variante: str, name: str = "Konrad") -> str:
+    """Die Front des Vollautomaten als SVG, nach Fotos eines EQ900 plus gezeichnet – animiert je nach Zustand.
+
+    Links die Maschine: schwarze Glasfront mit Bildschirm im Stil der Maschine, Tastenleiste
+    und Schriftzug (dem Namen der Maschine), darunter der Edelstahlkorpus mit Auslauf,
+    V-Blende, Glas und Tropfgitter, links der Griff des Wassertanks. Rechts Name,
+    Statuszeile und Untertitel. Die Animationen (SMIL) laufen auch als <img>.
     """
     status, untertitel, farbe = BILD_VARIANTEN[variante]
     an = variante != "aus"
     brueht = variante == "brueht"
     dampf = variante in ("brueht", "fertig")
-    led = "#9ecbff" if an else "#3a4047"
-    display_fill = {
-        "aus": "#07090d",
-        "achtung": "url(#display_amber)",
-        "fehler": "url(#display_rot)",
-    }.get(variante, "url(#display_blau)")
     teile = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {BILD_BREITE} {BILD_HOEHE}" '
         f'width="{BILD_BREITE}" height="{BILD_HOEHE}" role="img" aria-label="{name}: {status}">',
         "<defs>",
-        '<linearGradient id="korpus" x1="0" y1="0" x2="1" y2="0">'
-        '<stop offset="0" stop-color="#2f343b"/><stop offset=".5" stop-color="#1b1f24"/>'
-        '<stop offset="1" stop-color="#2a2f36"/></linearGradient>',
-        '<linearGradient id="stahl" x1="0" y1="0" x2="0" y2="1">'
-        '<stop offset="0" stop-color="#cfd8dc"/><stop offset=".5" stop-color="#8e9aa3"/>'
-        '<stop offset="1" stop-color="#b0bec5"/></linearGradient>',
+        '<linearGradient id="glas" x1="0" y1="0" x2="1" y2="1">'
+        '<stop offset="0" stop-color="#2a2d33"/><stop offset=".45" stop-color="#0f1114"/>'
+        '<stop offset="1" stop-color="#1a1d22"/></linearGradient>',
+        '<linearGradient id="stahl_korpus" x1="0" y1="0" x2="1" y2="0">'
+        '<stop offset="0" stop-color="#8d969e"/><stop offset=".15" stop-color="#c3cad0"/>'
+        '<stop offset=".5" stop-color="#9aa3ab"/><stop offset=".85" stop-color="#c3cad0"/>'
+        '<stop offset="1" stop-color="#8d969e"/></linearGradient>',
+        '<linearGradient id="stahl_blende" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#e3e8ec"/><stop offset="1" stop-color="#aab3bb"/></linearGradient>',
+        '<linearGradient id="stahl_schale" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#d3dadf"/><stop offset=".6" stop-color="#9ea7ae"/>'
+        '<stop offset="1" stop-color="#7f888f"/></linearGradient>',
         '<linearGradient id="auslauf" x1="0" y1="0" x2="0" y2="1">'
-        '<stop offset="0" stop-color="#3a4048"/><stop offset="1" stop-color="#14171b"/></linearGradient>',
-        '<linearGradient id="display_blau" x1="0" y1="0" x2="0" y2="1">'
-        '<stop offset="0" stop-color="#0b2545"/><stop offset="1" stop-color="#134074"/></linearGradient>',
-        '<linearGradient id="display_amber" x1="0" y1="0" x2="0" y2="1">'
-        '<stop offset="0" stop-color="#5d3a00"/><stop offset="1" stop-color="#8a5a00"/></linearGradient>',
-        '<linearGradient id="display_rot" x1="0" y1="0" x2="0" y2="1">'
-        '<stop offset="0" stop-color="#6a1b1b"/><stop offset="1" stop-color="#9c2a2a"/></linearGradient>',
-        '<linearGradient id="wasser" x1="0" y1="0" x2="0" y2="1">'
-        '<stop offset="0" stop-color="#81d4fa"/><stop offset="1" stop-color="#29b6f6"/></linearGradient>',
-        '<clipPath id="glas"><path d="M278 382 h64 l-5 50 h-54 z"/></clipPath>',
+        '<stop offset="0" stop-color="#2b2f35"/><stop offset="1" stop-color="#0d0f12"/></linearGradient>',
+        '<radialGradient id="duese" cx=".4" cy=".35" r=".7">'
+        '<stop offset="0" stop-color="#f1f4f6"/><stop offset=".6" stop-color="#9aa4ac"/>'
+        '<stop offset="1" stop-color="#5c656c"/></radialGradient>',
+        '<linearGradient id="ui_blau" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#1b4fb3"/><stop offset="1" stop-color="#2f86e3"/></linearGradient>',
+        '<linearGradient id="ui_amber" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#a65f00"/><stop offset="1" stop-color="#e0a200"/></linearGradient>',
+        '<linearGradient id="ui_rot" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#8e1b1b"/><stop offset="1" stop-color="#d32f2f"/></linearGradient>',
+        '<linearGradient id="ui_theke" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#f4f6f8"/><stop offset="1" stop-color="#d6dbe0"/></linearGradient>',
+        '<linearGradient id="chrom" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#f5f7f9"/><stop offset=".5" stop-color="#b8c0c7"/>'
+        '<stop offset="1" stop-color="#e3e7ea"/></linearGradient>',
+        '<clipPath id="glasrand"><path d="M296 352 h68 l-6 60 h-56 z"/></clipPath>',
         "</defs>",
-        # Schatten und Korpus
-        '<ellipse cx="310" cy="478" rx="235" ry="12" fill="#000" opacity=".22"/>',
-        '<rect x="110" y="70" width="400" height="400" rx="26" fill="url(#korpus)" stroke="#0e1013" stroke-width="2"/>',
-        '<rect x="150" y="96" width="320" height="202" rx="18" fill="#1d2126"/>',
-        '<rect x="110" y="446" width="400" height="24" rx="10" fill="url(#stahl)"/>',
+        # Schatten, Griff des Wassertanks, Edelstahlkorpus mit V-Blende
+        '<ellipse cx="330" cy="484" rx="250" ry="11" fill="#000" opacity=".22"/>',
+        '<rect x="54" y="150" width="24" height="190" rx="8" fill="#23272d" stroke="#4a5057" stroke-width="1"/>',
+        '<rect x="118" y="250" width="424" height="226" rx="12" fill="url(#stahl_korpus)" stroke="#6f777e" stroke-width="1"/>',
+        '<path d="M268 318 h124 l94 152 h-312 z" fill="url(#stahl_blende)" opacity=".85"/>',
+        # Tropfschale mit Gitter
+        '<rect x="104" y="436" width="452" height="42" rx="10" fill="url(#stahl_schale)" stroke="#6f777e" stroke-width="1"/>',
     ]
-    # Bohnenbehälter (zwei Hauben mit Bohnen)
-    for links in (160, 320):
-        mitte = links + 70
+    for i in range(7):
+        breite = 300 + i * 10
         teile.append(
-            f'<path d="M{links} 72 q0 -46 70 -46 q70 0 70 46 z" fill="#3b4048" stroke="#0e1013" stroke-width="2"/>'
+            f'<rect x="{330 - breite / 2:.0f}" y="{441 + i * 4.6:.1f}" width="{breite}" height="2.4" rx="1.2" fill="#1b1e22"/>'
         )
-        for i in range(6):
-            x = links + 18 + i * 22
-            teile.append(
-                f'<ellipse cx="{x}" cy="{62 if i % 2 else 57}" rx="8" ry="5" fill="#4e342e" '
-                f'transform="rotate({-25 if i % 2 else 20} {x} 60)"/>'
-            )
-        teile.append(
-            f'<path d="M{links + 14} 58 q{56} -34 {112} 0" fill="none" stroke="#7a8590" stroke-width="3" opacity=".55"/>'
-        )
-        teile.append(f'<rect x="{mitte - 10}" y="22" width="20" height="6" rx="3" fill="#8e9aa3"/>')
-    # Ein/Aus-Taste (das Symbol legt das Dashboard als tippbares Element darüber)
-    teile.append('<circle cx="140" cy="112" r="12" fill="#14171b" stroke="#6b7280" stroke-width="2"/>')
-    if an:
-        teile.append('<circle cx="140" cy="112" r="15" fill="none" stroke="#9ecbff" stroke-width="2" opacity=".55"/>')
-    # Bildschirm
-    teile.append(
-        f'<rect x="190" y="112" width="240" height="140" rx="12" fill="{display_fill}" stroke="#2c323a" stroke-width="3"/>'
-    )
+    # Glasfront mit Bildschirm, Tastenleiste und Schriftzug
+    teile.append('<rect x="70" y="22" width="520" height="240" rx="10" fill="url(#glas)" stroke="#4a5057" stroke-width="2"/>')
+    teile.append('<path d="M80 30 h200 l-120 224 h-80 z" fill="#ffffff" opacity=".035"/>')
+    teile.append('<path d="M82 26 h496" stroke="#ffffff" stroke-width="1.2" opacity=".18"/>')
     teile.append(_display(variante))
-    # Tastenreihe mit LEDs
-    for x, r in ((215, 7), (260, 7), (310, 10), (360, 7), (405, 7)):
-        extra = (
-            '<animate attributeName="opacity" values="1;.3;1" dur="2.4s" repeatCount="indefinite"/>'
-            if an and x == 310 and not brueht
-            else ""
-        )
-        teile.append(f'<circle cx="{x}" cy="278" r="{r}" fill="{led}">{extra}</circle>')
-    # Auslauf mit zwei Öffnungen und Milchdüse
-    teile.append('<rect x="262" y="296" width="96" height="48" rx="10" fill="url(#auslauf)" stroke="#0e1013"/>')
-    teile.append('<rect x="286" y="342" width="10" height="10" fill="#0e1013"/>')
-    teile.append('<rect x="324" y="342" width="10" height="10" fill="#0e1013"/>')
-    teile.append('<rect x="353" y="330" width="6" height="26" rx="2" fill="#b0bec5"/>')
-    # Wassertank rechts
-    teile.append('<rect x="470" y="130" width="34" height="296" rx="8" fill="#263238" stroke="#0e1013"/>')
-    teile.append('<rect x="474" y="250" width="26" height="172" rx="6" fill="url(#wasser)" opacity=".6"/>')
-    teile.append('<rect x="478" y="118" width="18" height="8" rx="3" fill="#90a4ae"/>')
-    # Tropfgitter
-    teile.append('<rect x="150" y="434" width="320" height="14" rx="4" fill="url(#stahl)"/>')
+    teile.append('<rect x="180" y="48" width="300" height="145" rx="4" fill="none" stroke="#2a2e34" stroke-width="1.5"/>')
+    teile.append(_tastenleiste(an))
     teile.append(
-        '<g fill="#1a1d21">'
-        + "".join(f'<rect x="{x}" y="438" width="12" height="6" rx="2"/>' for x in range(166, 460, 24))
-        + "</g>"
+        f'<text x="330" y="252" font-size="19" font-weight="700" letter-spacing="4" fill="url(#chrom)" '
+        f'font-family="{SCHRIFT}" text-anchor="middle">{name.upper()}</text>'
     )
+    # Auslauf mit zwei Düsen
+    teile.append('<rect x="270" y="262" width="120" height="54" rx="6" fill="url(#auslauf)" stroke="#07080a"/>')
+    teile.append('<rect x="278" y="268" width="104" height="4" rx="2" fill="#3a3f46" opacity=".8"/>')
+    for x in (307, 353):
+        teile.append(f'<circle cx="{x}" cy="322" r="10" fill="url(#duese)"/><circle cx="{x}" cy="322" r="4" fill="#1b1e22"/>')
     # Glas: Inhalt (geclippt), dann das Glas selbst
     if brueht:
         teile.append(
-            '<g clip-path="url(#glas)"><rect x="270" y="434" width="80" height="0" fill="#5d3a1a">'
-            f'<animate attributeName="y" values="434;384" dur="{FUELLDAUER}" repeatCount="indefinite"/>'
-            f'<animate attributeName="height" values="0;50" dur="{FUELLDAUER}" repeatCount="indefinite"/>'
+            '<g clip-path="url(#glasrand)"><rect x="290" y="412" width="80" height="0" fill="#5d3a1a">'
+            f'<animate attributeName="y" values="412;358" dur="{FUELLDAUER}" repeatCount="indefinite"/>'
+            f'<animate attributeName="height" values="0;54" dur="{FUELLDAUER}" repeatCount="indefinite"/>'
             "</rect></g>"
         )
     elif variante == "fertig":
         teile.append(
-            '<g clip-path="url(#glas)"><rect x="270" y="384" width="80" height="50" fill="#5d3a1a"/>'
-            '<rect x="270" y="384" width="80" height="9" fill="#c8a27a"/></g>'
+            '<g clip-path="url(#glasrand)"><rect x="290" y="358" width="80" height="54" fill="#5d3a1a"/>'
+            '<rect x="290" y="358" width="80" height="9" fill="#c8a27a"/></g>'
         )
     teile.append(
-        '<path d="M276 378 h68 l-6 56 h-56 z" fill="#ffffff" fill-opacity=".16" stroke="#eceff1" '
+        '<path d="M296 352 h68 l-6 60 h-56 z" fill="#ffffff" fill-opacity=".16" stroke="#eceff1" '
         'stroke-width="3" stroke-linejoin="round"/>'
     )
     teile.append(
-        '<path d="M345 392 q22 2 20 18 q-2 14 -22 14" fill="none" stroke="#eceff1" stroke-width="6" stroke-linecap="round"/>'
+        '<path d="M363 366 q22 2 20 18 q-2 14 -22 14" fill="none" stroke="#eceff1" stroke-width="6" stroke-linecap="round"/>'
     )
     # Kaffeestrahlen
     if brueht:
-        for x in (291, 329):
+        for x in (307, 353):
             teile.append(
-                f'<line x1="{x}" y1="352" x2="{x}" y2="386" stroke="#5d3a1a" stroke-width="5" stroke-linecap="round" '
+                f'<line x1="{x}" y1="334" x2="{x}" y2="360" stroke="#5d3a1a" stroke-width="5" stroke-linecap="round" '
                 'stroke-dasharray="7 5"><animate attributeName="stroke-dashoffset" from="0" to="-24" dur=".45s" '
                 'repeatCount="indefinite"/></line>'
             )
     # Dampf
     if dampf:
-        for i, x in enumerate((296, 310, 324)):
+        for i, x in enumerate((318, 330, 342)):
             teile.append(
-                f'<path d="M{x} 374 c-7 -9 7 -15 0 -26" fill="none" stroke="#cfd8dc" stroke-width="4" '
+                f'<path d="M{x} 346 c-7 -9 7 -15 0 -26" fill="none" stroke="#cfd8dc" stroke-width="4" '
                 f'stroke-linecap="round" opacity="0">'
                 f'<animateTransform attributeName="transform" type="translate" values="0 0;0 -30" dur="2.6s" '
                 f'begin="{i * 0.9:.1f}s" repeatCount="indefinite"/>'
@@ -2485,12 +2542,12 @@ def konrad_svg(variante: str, name: str = "Konrad") -> str:
             )
     # Rechts: Name, Status, Untertitel
     teile.append(
-        f'<text x="600" y="160" font-size="42" font-weight="600" fill="#8d6e63" font-family="{SCHRIFT}">{name}</text>'
+        f'<text x="640" y="160" font-size="42" font-weight="600" fill="#8d6e63" font-family="{SCHRIFT}">{name}</text>'
     )
     teile.append(
-        f'<text x="596" y="248" font-size="78" font-weight="700" fill="{farbe}" font-family="{SCHRIFT}">{status}</text>'
+        f'<text x="636" y="248" font-size="78" font-weight="700" fill="{farbe}" font-family="{SCHRIFT}">{status}</text>'
     )
-    teile.append(f'<text x="600" y="302" font-size="32" fill="#90a4ae" font-family="{SCHRIFT}">{untertitel}</text>')
+    teile.append(f'<text x="640" y="302" font-size="32" fill="#90a4ae" font-family="{SCHRIFT}">{untertitel}</text>')
     teile.append("</svg>")
     return "\n".join(teile) + "\n"
 
@@ -2545,28 +2602,35 @@ def kopfkarte(
         },
     ]
     laeuft = [{"entity": zustand, "state": "run"}]
+    anzeige = {  # Beschriftung in der Kopfzeile des Bildschirms
+        **stelle(*ANZEIGE_STELLE),
+        "transform": "translate(-50%, -50%)",
+        "color": "#ffffff",
+        "font-size": ANZEIGE_SCHRIFT,
+        "font-weight": "600",
+        "max-width": "17%",
+        "white-space": "nowrap",
+        "overflow": "hidden",
+        "text-overflow": "ellipsis",
+    }
+    # Wie an der Maschine steht das Programm im Bildschirmkopf: das laufende, sonst das ausgewählte.
     if maschine.get("aktiv"):
         elemente.append(
             {
                 "type": "conditional",
                 "conditions": laeuft,
-                "elements": [
-                    {
-                        "type": "state-label",
-                        "entity": maschine["aktiv"],
-                        "style": {
-                            **stelle(600, 372),
-                            "transform": "translate(0, -50%)",
-                            "color": "#eceff1",
-                            "font-size": SCHRIFTGROESSE,
-                            "font-weight": "600",
-                            "max-width": "46%",
-                            "white-space": "nowrap",
-                            "overflow": "hidden",
-                            "text-overflow": "ellipsis",
-                        },
-                    }
-                ],
+                "elements": [{"type": "state-label", "entity": maschine["aktiv"], "style": anzeige}],
+            }
+        )
+    if maschine.get("gewaehlt"):
+        elemente.append(
+            {
+                "type": "conditional",
+                "conditions": [
+                    {"entity": zustand, "state_not": z} for z in ("run", "inactive", "unknown", "unavailable")
+                ]
+                + [{"entity": maschine["gewaehlt"], "state_not": z} for z in ("unknown", "unavailable")],
+                "elements": [{"type": "state-label", "entity": maschine["gewaehlt"], "style": anzeige}],
             }
         )
     if maschine.get("fortschritt"):
@@ -2580,7 +2644,7 @@ def kopfkarte(
                         "entity": maschine["fortschritt"],
                         "prefix": "Fortschritt ",
                         "style": {
-                            **stelle(600, 428),
+                            **stelle(640, 372),
                             "transform": "translate(0, -50%)",
                             "color": "#90a4ae",
                             "font-size": SCHRIFTGROESSE,
