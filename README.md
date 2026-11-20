@@ -195,7 +195,9 @@ python3 installieren.py --getraenke --personen Jens,Nicole --auch-in
 ```
 
 zeigt die vorhandenen Dashboards zur Auswahl (mehrere möglich), merkt sich die
-Wahl und erneuert die Reiter bei jedem weiteren Lauf mit. Die Übersicht lässt
+Wahl und erneuert die Reiter bei jedem weiteren Lauf mit. Hat ein Dashboard eine
+Navigationsleiste aus HACS (Navbar Card), kommt die Kaffeemaschine auch dort als
+Punkt hinein, und der neue Reiter bekommt dieselbe Leiste. Die Übersicht lässt
 sich erst ergänzen, wenn sie nicht mehr automatisch erzeugt wird (Stift →
 „Steuerung übernehmen“). Zeigt ein Zähler wie „Heißwasser“ eine Einheit wie
 fl. oz., lässt sich das in den Einstellungen der Entität auf ml umstellen.
