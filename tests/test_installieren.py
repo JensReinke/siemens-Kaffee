@@ -3843,10 +3843,142 @@ async def test_dashboard_zeigen(
     assert "Ansicht 1: „Übersicht“ (Pfad uebersicht, Typ masonry)" in zeilen
     assert "  - vertical-stack" in zeilen
     assert "    - markdown" in zeilen
-    assert "    - custom:navbar-card  3 Routen: mdi:arrow-left, Uebersicht, Licht" in zeilen
+    assert "    - custom:navbar-card  ← Navigationsleiste  3 Routen: mdi:arrow-left, Uebersicht, Licht" in zeilen
     assert "Ansicht 2: „Licht“ (Pfad licht, Typ sections)" in zeilen
     assert "  - grid" in zeilen and f"    - tile  entity={KAFFEEMASCHINE}" in zeilen
     assert home_assistant.states.get(GETRAENK) is None  # nichts eingerichtet
 
     code, _, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--dashboard-zeigen", "garten")
     assert code == 1 and "automatisch erzeugt" in fehler
+
+
+
+# --- Selbstgebaute Leiste aus Button-Cards --------------------------------------
+
+
+def knopf(name: str, ziel: str, icon: str = "mdi:home") -> dict[str, Any]:
+    return {
+        "card": {
+            "type": "custom:button-card",
+            "name": name,
+            "icon": icon,
+            "tap_action": {"action": "navigate", "navigation_path": ziel},
+            "styles": {"card": [{"background": "none"}]},
+        }
+    }
+
+
+def leiste_aus_buttons() -> dict[str, Any]:
+    """Wie bei Jens: eine Button-Card mit Pfeilen und Knöpfen, fest am unteren Rand, in den Badges jeder Ansicht."""
+    return {
+        "type": "custom:button-card",
+        "custom_fields": {
+            "zurueck": {"card": {"type": "custom:button-card", "icon": "mdi:arrow-left", "tap_action": {"action": "navigate", "navigation_path": "back"}}},
+            "haus": knopf("Haus", f"/{HAUS}/uebersicht"),
+            "licht": knopf("Licht", f"/{HAUS}/licht", "mdi:lightbulb"),
+            "system": knopf("System", f"/{HAUS}/system", "mdi:server"),
+        },
+        "styles": {
+            "card": [{"position": "fixed"}, {"bottom": "0"}],
+            "grid": [{"grid-template-areas": '"zurueck haus licht system"'}, {"grid-template-columns": "repeat(4, 1fr)"}],
+            "custom_fields": {"haus": [{"justify-self": "center"}], "system": [{"justify-self": "center"}]},
+        },
+    }
+
+
+KONRAD_KNOPF = knopf("Kaffeevollautomat", f"/{HAUS}/kaffee-konrad", "mdi:coffee")
+
+
+async def test_konrad_in_der_button_card_leiste(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Konrad wird als Knopf hinter „System“ eingefügt, das Raster wächst, der Konrad-Reiter bekommt die Leiste als Badge."""
+    uebersicht = {
+        "title": "Übersicht", "path": "uebersicht", "type": "sections",
+        "badges": [{"type": "entity", "entity": KAFFEEMASCHINE}, leiste_aus_buttons()],
+        "sections": [{"type": "grid", "cards": [{"type": "markdown", "content": "Haus"}]}],
+    }
+    licht = {"title": "Licht", "path": "licht", "type": "sections", "sections": [], "badges": [leiste_aus_buttons()]}
+    await haus_anlegen(hass_ws_client, home_assistant, {"views": [uebersicht, licht]})
+
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", HAUS
+    )
+    assert code == 0, fehler
+    assert f"✓ Reiter „Kaffeevollautomat“ im Dashboard „{HAUS}“ angelegt, auch in der Navigationsleiste" in ausgabe
+    config = await haus_config(hass_ws_client, home_assistant)
+    for ansicht in config["views"][:2]:
+        leiste = ansicht["badges"][-1]
+        assert list(leiste["custom_fields"]) == ["zurueck", "haus", "licht", "system", "kaffeevollautomat"]
+        assert leiste["custom_fields"]["kaffeevollautomat"] == KONRAD_KNOPF
+        assert leiste["custom_fields"]["system"] == knopf("System", f"/{HAUS}/system", "mdi:server")  # Vorlage unverändert
+        assert leiste["styles"]["grid"] == [
+            {"grid-template-areas": '"zurueck haus licht system kaffeevollautomat"'},
+            {"grid-template-columns": "repeat(5, 1fr)"},
+        ]
+        assert leiste["styles"]["custom_fields"]["kaffeevollautomat"] == [{"justify-self": "center"}]
+    assert config["views"][0]["badges"][0] == {"type": "entity", "entity": KAFFEEMASCHINE}
+    reiter = config["views"][2]
+    assert reiter["badges"][-1] == config["views"][0]["badges"][-1]  # die Leiste liegt beim Reiter auch in den Badges
+    assert reiter["badges"][:-1] == (await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=installieren.DASHBOARD_URL))["views"][0]["badges"]
+    assert all(k["type"] != "custom:button-card" for s in reiter["sections"] for k in s["cards"])
+
+    # Zweiter Lauf: nichts verdoppelt sich.
+    code, ausgabe, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, "--personen", "Jens")
+    assert code == 0, fehler
+    config = await haus_config(hass_ws_client, home_assistant)
+    assert list(config["views"][0]["badges"][-1]["custom_fields"]) == ["zurueck", "haus", "licht", "system", "kaffeevollautomat"]
+    assert config["views"][0]["badges"][-1]["styles"]["grid"][1] == {"grid-template-columns": "repeat(5, 1fr)"}
+    assert len(config["views"][2]["badges"]) == len(reiter["badges"])
+
+    # Aus: Knopf, Raster und Reiter wie vorher.
+    code, _, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", "aus"
+    )
+    assert code == 0, fehler
+    assert (await haus_config(hass_ws_client, home_assistant))["views"] == [uebersicht, licht]
+
+
+def test_raster_der_leiste_erweitern_und_verkleinern() -> None:
+    """Spalten als Liste statt repeat, Bereiche über zwei Zeilen, Raster als Wörterbuch."""
+    karte = {
+        "type": "custom:button-card",
+        "custom_fields": {"a": knopf("A", "/x/a"), "b": knopf("B", "/x/b"), "c": knopf("C", "/x/c")},
+        "styles": {"grid": {"grid-template-areas": '"a b c" "a b c"', "grid-template-columns": "1fr 2fr 1fr"}},
+    }
+    assert installieren.ist_leiste(karte)
+    assert installieren.leiste_feld_einfuegen(karte, "/x/kaffee-konrad", "Konrad") is True
+    assert karte["custom_fields"]["konrad"]["card"]["tap_action"] == {"action": "navigate", "navigation_path": "/x/kaffee-konrad"}
+    assert karte["styles"]["grid"] == {"grid-template-areas": '"a b c konrad" "a b c konrad"', "grid-template-columns": "1fr 2fr 1fr 1fr"}
+    assert installieren.leiste_feld_einfuegen(karte, "/x/kaffee-konrad", "Konrad") is True  # schon drin, nichts doppelt
+    assert list(karte["custom_fields"]) == ["a", "b", "c", "konrad"]
+    assert installieren.leiste_feld_entfernen(karte, "/x/kaffee-konrad") is True
+    assert list(karte["custom_fields"]) == ["a", "b", "c"]
+    assert karte["styles"]["grid"] == {"grid-template-areas": '"a b c" "a b c"', "grid-template-columns": "1fr 2fr 1fr"}
+    assert installieren.leiste_feld_entfernen(karte, "/x/kaffee-konrad") is False
+    # Zwei Knöpfe sind keine Leiste; ohne navigierenden Knopf gibt es keine Vorlage.
+    assert not installieren.ist_leiste({"type": "custom:button-card", "custom_fields": {"a": knopf("A", "/x/a"), "b": knopf("B", "/x/b")}})
+    assert installieren.leiste_feld_einfuegen({"type": "custom:button-card", "custom_fields": {"a": {"card": {"type": "markdown"}}}}, "/x/k", "K") is False
+
+
+async def test_dashboard_zeigen_nennt_die_leiste(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ansicht = {"title": "Übersicht", "path": "uebersicht", "type": "sections", "sections": [], "badges": [leiste_aus_buttons()]}
+    await haus_anlegen(hass_ws_client, home_assistant, {"views": [ansicht]})
+    code, ausgabe, fehler = await skript(home_assistant, client, capsys, "--token", hass_access_token, "--dashboard-zeigen", HAUS)
+    assert code == 0, fehler
+    assert "  - custom:button-card  ← Navigationsleiste" in ausgabe.splitlines()
+    assert "    - custom:button-card  name=System" in ausgabe.splitlines()
+    assert "Navigationsleiste im Wortlaut (erste gefundene):" in ausgabe
+    assert json.loads(ausgabe.split("Navigationsleiste im Wortlaut (erste gefundene):\n", 1)[1]) == leiste_aus_buttons()
