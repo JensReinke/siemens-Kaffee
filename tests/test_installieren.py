@@ -3010,26 +3010,36 @@ async def test_dashboard_wird_angelegt_und_bereitet_zu(
     assert {e["elements"][0].get("icon") for e in kopf["elements"] if e["type"] == "conditional"} == {
         None, "mdi:water-alert", "mdi:tray-alert"
     }
-    ueberschriften = [abschnitt["cards"][0]["heading"] for abschnitt in ansicht["sections"][1:]]
-    assert ueberschriften == ["Jens", "Nicole", "Getränk zusammenstellen", "Kaffeevollautomat", "Wartung", "Zähler"]
-    jens = ansicht["sections"][1]["cards"]
-    assert [karte["entity"] for karte in jens[1:4]] == [JENS_1, "input_text.lieblingsgetrank_jens_2", "input_text.lieblingsgetrank_jens_3"]
-    assert jens[1]["tap_action"]["perform_action"] == "script.lieblingsgetraenk_zubereiten"
-    assert jens[1]["tap_action"]["data"] == {"platz": "jens_1"}
-    assert jens[1]["hold_action"]["perform_action"] == "script.lieblingsgetraenk_speichern"
-    direkt = ansicht["sections"][4]["cards"]
+    # Drei etwa gleich hohe Abschnitte unter dem Bild – keine Leerflächen in der Spaltenansicht.
+    assert len(ansicht["sections"]) == 4
+    ueberschriften = [[k["heading"] for k in a["cards"] if k["type"] == "heading"] for a in ansicht["sections"][1:]]
+    assert ueberschriften == [
+        ["Lieblingsgetränke", "Jens", "Nicole", "Getränk zusammenstellen"], ["Kaffeevollautomat"], ["Wartung", "Zähler"]
+    ]
+    links = ansicht["sections"][1]["cards"]
+    assert links[1]["heading_style"] == "subtitle"
+    assert [karte["entity"] for karte in links[2:5]] == [JENS_1, "input_text.lieblingsgetrank_jens_2", "input_text.lieblingsgetrank_jens_3"]
+    assert links[2]["tap_action"]["perform_action"] == "script.lieblingsgetraenk_zubereiten"
+    assert links[2]["tap_action"]["data"] == {"platz": "jens_1"}
+    assert links[2]["hold_action"]["perform_action"] == "script.lieblingsgetraenk_speichern"
+    assert links[6]["entity"] == "input_text.lieblingsgetrank_nicole_1"
+    assert [karte["type"] for karte in links[9:12]] == ["markdown", "heading", "tile"]  # Hinweis, dann Zusammenstellen
+    assert links[11]["entity"] == GETRAENK
+    direkt = ansicht["sections"][2]["cards"]
     assert direkt[1]["entity"] == KAFFEEMASCHINE
     assert {karte.get("entity") for karte in direkt} >= {AKTIV, GEWAEHLT, BOHNENMENGE, FUELLMENGE, MEHRERE_GETRAENKE,
                                                           "switch.kaffeevollautomat_kindersicherung",
                                                           "switch.kaffeevollautomat_tassenwarmer",
                                                           "sensor.kaffeevollautomat_betriebszustand",
                                                           "sensor.kaffeevollautomat_programm_fortschritt"}
-    wartung = ansicht["sections"][5]["cards"]
-    assert [(karte["entity"], karte["name"]) for karte in wartung[1:]] == [
+    pflege = ansicht["sections"][3]["cards"]
+    assert [(karte["entity"], karte["name"]) for karte in pflege[1:3]] == [
         (WASSERTANK.replace("wassertank_leer", "tropfschale_voll"), "Tropfschale voll"),
         (WASSERTANK, "Wassertank leer"),
     ]
-    assert ansicht["sections"][6]["cards"][1] == {
+    assert "visibility" not in pflege[1] and "visibility" not in pflege[2]  # die drei Alltagshinweise immer
+    assert pflege[3]["heading"] == "Zähler"
+    assert pflege[4] == {
         "type": "tile", "entity": "sensor.kaffeevollautomat_kaffees", "name": "Kaffees", "icon": "mdi:counter", "color": "brown",
     }
     assert [badge["entity"] for badge in ansicht["badges"]] == [
@@ -3393,6 +3403,28 @@ def test_kopfkarte_deckt_alle_betriebszustaende_ab() -> None:
     }
 
 
+def test_kacheln_nur_wenn_verfuegbar_oder_anliegend() -> None:
+    """Optionen, die das Getränk nicht hat, und Hinweise, die nicht anliegen, bleiben unsichtbar."""
+    ansicht = installieren.beispiel_konfigurationen()["dashboard"]["views"][0]
+    direkt = {k["name"]: k for k in ansicht["sections"][2]["cards"] if k["type"] == "tile"}
+    for name in ("Stärke", "Temperatur", "Milchanteil", "Intensität", "Füllmenge", "Mehrere Getränke"):
+        assert direkt[name]["visibility"] == [
+            {"condition": "state", "entity": direkt[name]["entity"], "state_not": "unavailable"}
+        ], name
+    for name in ("Ein / Aus", "Kindersicherung", "Zustand", "Fernstart erlaubt", "Sofort starten", "Ausgewähltes Programm"):
+        assert "visibility" not in direkt[name], name
+    pflege = {k["name"]: k for k in ansicht["sections"][3]["cards"] if k["type"] == "tile"}
+    for name in ("Wassertank leer", "Bohnenbehälter leer", "Tropfschale voll", "Kaffees", "Kaffee- und Milchtassen"):
+        assert "visibility" not in pflege[name], name
+    assert pflege["Entkalken des Geräts empfohlen"]["visibility"] == [
+        {
+            "condition": "state",
+            "entity": "sensor.konrad_entkalken_des_gerats_empfohlen",
+            "state_not": ["off", "unknown", "unavailable"],
+        }
+    ]
+
+
 def test_ohne_betriebszustand_keine_zeichnung() -> None:
     maschine = {"einschalter": "switch.konrad_einschalter", "aktiv": "select.konrad_aktives_programm"}
     assert installieren.kopfkarte("Konrad", maschine, {}) is None
@@ -3408,3 +3440,139 @@ def test_ohne_bilder_kuerzt_nur_eingebettete_bilder() -> None:
         "a": [f"data:image/svg+xml;base64,… ({len(uri)} Zeichen)", "data:text/plain,x", 3],
         "b": {"c": f"data:image/svg+xml;base64,… ({len(uri)} Zeichen)"},
     }
+
+
+
+# --- Konrad als Reiter in weiteren Dashboards (--auch-in) ---------------------
+
+WANDTABLET = "wand-wohnzimmer"
+ALLE_GERAETE = {"title": "Alle Geräte", "path": "alle-geraete", "cards": [{"type": "markdown", "content": "Alles"}]}
+
+
+async def wandtablet_anlegen(hass_ws_client: WebSocketGenerator, hass: HomeAssistant) -> None:
+    """Ein zweites, von Hand gestaltetes Dashboard mit dem Reiter „Alle Geräte“ – wie für ein Wandtablet."""
+    await ws_befehl(
+        hass_ws_client, hass, type="lovelace/dashboards/create", url_path=WANDTABLET, title="Wand Wohnzimmer",
+        icon="mdi:tablet", show_in_sidebar=True, require_admin=False,
+    )
+    await ws_befehl(hass_ws_client, hass, type="lovelace/config/save", url_path=WANDTABLET, config={"views": [ALLE_GERAETE]})
+
+
+async def test_konrad_als_reiter_in_anderen_dashboards(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--auch-in legt die Konrad-Ansicht als Reiter in ein anderes Dashboard, merkt sich das und räumt wieder auf."""
+    await wandtablet_anlegen(hass_ws_client, home_assistant)
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens,Nicole", "--auch-in", WANDTABLET
+    )
+    assert code == 0, fehler
+    assert f"✓ Reiter „Kaffeevollautomat“ im Dashboard „{WANDTABLET}“ angelegt" in ausgabe
+    config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=WANDTABLET)
+    assert [v["title"] for v in config["views"]] == ["Alle Geräte", "Kaffeevollautomat"]
+    assert config["views"][0] == ALLE_GERAETE  # der vorhandene Reiter bleibt unangetastet
+    reiter = config["views"][1]
+    assert reiter["path"] == "kaffee-konrad" and reiter["kaffee_dashboard"] is True and reiter["icon"] == "mdi:coffee"
+    konrad_config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=installieren.DASHBOARD_URL)
+    assert konrad_config["weitere_dashboards"] == [WANDTABLET]
+    assert reiter["sections"] == konrad_config["views"][0]["sections"]
+    assert reiter["badges"] == konrad_config["views"][0]["badges"]
+
+    # Zweiter Lauf ohne --auch-in: der Reiter wird mit erneuert, nicht verdoppelt.
+    code, ausgabe, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, "--personen", "Jens,Nicole")
+    assert code == 0, fehler
+    assert f"✓ Reiter „Kaffeevollautomat“ im Dashboard „{WANDTABLET}“ aktualisiert" in ausgabe
+    config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=WANDTABLET)
+    assert [v["title"] for v in config["views"]] == ["Alle Geräte", "Kaffeevollautomat"]
+
+    # --auch-in aus nimmt den Reiter wieder heraus und vergisst das Dashboard.
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens,Nicole", "--auch-in", "aus"
+    )
+    assert code == 0, fehler
+    assert f"✓ Reiter „Kaffeevollautomat“ aus dem Dashboard „{WANDTABLET}“ entfernt" in ausgabe
+    config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=WANDTABLET)
+    assert config["views"] == [ALLE_GERAETE]
+    konrad_config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=installieren.DASHBOARD_URL)
+    assert konrad_config["weitere_dashboards"] == []
+
+
+async def test_auch_in_im_terminal_waehlen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--auch-in ohne Wert zeigt die Dashboards zur Auswahl – ohne das Konrad-Dashboard selbst."""
+    await wandtablet_anlegen(hass_ws_client, home_assistant)
+    with patch.object(sys.stdin, "isatty", return_value=True), patch("builtins.input", side_effect=["2"]):
+        code, ausgabe, fehler = await dashboard_einrichten(
+            home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in"
+        )
+    assert code == 0, fehler
+    assert "In welche weiteren Dashboards soll die Kaffeemaschine als Reiter? (mehrere möglich)" in ausgabe
+    assert "1) „Übersicht“ (Standard-Dashboard)  –  lovelace" in ausgabe
+    assert f"2) „Wand Wohnzimmer“  –  {WANDTABLET}" in ausgabe
+    assert "3)" not in ausgabe  # das Konrad-Dashboard steht nicht zur Wahl
+    assert f"✓ Reiter „Kaffeevollautomat“ im Dashboard „{WANDTABLET}“ angelegt" in ausgabe
+    config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=WANDTABLET)
+    assert [v["title"] for v in config["views"]] == ["Alle Geräte", "Kaffeevollautomat"]
+
+
+@pytest.mark.usefixtures("konrad")
+async def test_auch_in_unbekanntes_oder_automatisches_dashboard(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ein unbekanntes Dashboard bricht ab und nennt die möglichen; die automatische Übersicht wird erklärt."""
+    code, _, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", "garten"
+    )
+    assert code == 1
+    assert "Dashboard nicht gefunden: garten. Möglich sind (Pfad aus der Adresszeile): lovelace („Übersicht“ (Standard-Dashboard))" in fehler
+    assert await ws_befehl(hass_ws_client, home_assistant, type="lovelace/dashboards/list") == []  # nichts angelegt
+
+    # Die Übersicht wird im Test-HA automatisch erzeugt – das Skript erklärt, was zu tun ist, und macht weiter.
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", "lovelace"
+    )
+    assert code == 0, fehler
+    assert "⚠ Kein Reiter im Dashboard „lovelace“: Das Dashboard „lovelace“ wird von Home Assistant automatisch erzeugt" in ausgabe
+    assert "„Steuerung übernehmen“" in ausgabe
+    konrad_config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=installieren.DASHBOARD_URL)
+    assert konrad_config["weitere_dashboards"] == []
+
+    # Ohne Terminal braucht --auch-in die Pfade.
+    code, _, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in"
+    )
+    assert code == 1
+    assert "--auch-in braucht ohne Terminal die Dashboards als Pfade" in fehler
+
+
+@pytest.mark.usefixtures("konrad")
+async def test_nur_anzeigen_mit_auch_in(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    await wandtablet_anlegen(hass_ws_client, home_assistant)
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", WANDTABLET, "--nur-anzeigen"
+    )
+    assert code == 0, fehler
+    assert f"Die Ansicht käme außerdem als Reiter in: {WANDTABLET}" in ausgabe
+    config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=WANDTABLET)
+    assert config["views"] == [ALLE_GERAETE]

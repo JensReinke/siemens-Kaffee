@@ -103,6 +103,7 @@ genau einen Ersatz, übernimmt das Skript ihn von selbst. Nützliche Optionen
 | `--dunkel` | Das Licht geht nur an, wenn es dunkel ist. Ohne Wert sucht das Skript einen Helligkeitssensor (Geräteklasse „illuminance“ oder Einheit lx), bevorzugt einen aus der Küche, etwa den des Bewegungsmelders; deaktivierte Helligkeitssensoren bietet es zum Aktivieren an. Sonst `--dunkel sensor.…`. `--dunkel aus` entfernt die Bedingung wieder. |
 | `--dunkel-unter 20` | Bis zu welcher Helligkeit es „dunkel“ ist (Standard 20 lx). Darüber bleibt das Licht aus bzw. geht aus, sobald es hell wird. |
 | `--getraenke --personen Jens,Nicole` | Richtet statt der Automation das [Dashboard für die Kaffeemaschine](#dashboard-für-die-kaffeemaschine) ein: Getränke wählen und anpassen, Lieblingsgetränke je Person, Bedienung, Wartung, Zähler. `--plaetze 5` gibt jeder Person fünf statt drei Plätze. |
+| `--auch-in haus,wand-wohnzimmer` | Legt die Kaffeemaschine zusätzlich als Reiter in andere Dashboards (der Pfad aus der Adresszeile, `lovelace` ist die Übersicht), z. B. für Wandtablets oder das iPad. Ohne Wert zur Auswahl. Die Wahl merkt sich das Skript, `--auch-in aus` entfernt die Reiter wieder. |
 | `--token …` oder `HA_TOKEN` | Langlebiger Zugangstoken statt Benutzername/Passwort (Profil → Sicherheit). |
 
 Das Skript legt die Automation ohne Blueprint an (wie in
@@ -179,6 +180,25 @@ Namen der Maschine (z. B. „Konrad“, Symbol Kaffeetasse) – mit allem, was s
   voll, Entkalken, Calc'n'Clean … (Home Assistant hat diese Hinweise ab Werk
   deaktiviert – das Skript aktiviert sie) und die Zähler der Maschine. Was
   gerade anliegt, erscheint zusätzlich rot im Kopf des Dashboards.
+
+Das Dashboard passt sich der Bildschirmbreite an: Unter dem Bild stehen drei
+etwa gleich hohe Abschnitte (Lieblingsgetränke und Getränk zusammenstellen, die
+Maschine direkt, Wartung und Zähler), auf dem Mac nebeneinander, auf dem iPad in
+zwei Spalten, auf dem iPhone untereinander. Optionen, die das gewählte Getränk
+nicht hat, und Wartungshinweise, die nicht anliegen, bleiben unsichtbar; nur
+Wassertank, Bohnenbehälter und Tropfschale sind immer zu sehen. Soll die
+Kaffeemaschine auch in anderen Dashboards erscheinen, etwa auf den Wandtablets
+oder im Haus-Dashboard, legt `--auch-in` sie dort als Reiter ab:
+
+```bash
+python3 installieren.py --getraenke --personen Jens,Nicole --auch-in
+```
+
+zeigt die vorhandenen Dashboards zur Auswahl (mehrere möglich), merkt sich die
+Wahl und erneuert die Reiter bei jedem weiteren Lauf mit. Die Übersicht lässt
+sich erst ergänzen, wenn sie nicht mehr automatisch erzeugt wird (Stift →
+„Steuerung übernehmen“). Zeigt ein Zähler wie „Heißwasser“ eine Einheit wie
+fl. oz., lässt sich das in den Einstellungen der Entität auf ml umstellen.
 
 Dafür legt das Skript Helfer („Kaffee: Getränk“, „Kaffee: Stärke“, …,
 „Lieblingsgetränk Jens 1“) und drei Skripte an: „Kaffee zubereiten“,

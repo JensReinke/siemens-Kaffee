@@ -166,6 +166,14 @@ class Abbruch(Exception):
     """Ein Fehler, der dem Benutzer erklärt wird – ohne Python-Fehlermeldung."""
 
 
+class WebSocketFehler(Abbruch):
+    """Eine Fehlermeldung der WebSocket-API, samt ihrem Code (z. B. config_not_found)."""
+
+    def __init__(self, code: str, text: str) -> None:
+        super().__init__(text)
+        self.code = code
+
+
 def automation_config(
     alarmanlage: "str | list[str]",
     kaffeemaschine: str,
@@ -986,7 +994,9 @@ class WebSocket:
             if antwort.get("id") == self.naechste_id and antwort.get("type") == "result":
                 if not antwort.get("success"):
                     fehler = antwort.get("error") or {}
-                    raise Abbruch(f"Home Assistant meldet: {fehler.get('message', fehler)}")
+                    raise WebSocketFehler(
+                        str(fehler.get("code", "")), f"Home Assistant meldet: {fehler.get('message', fehler)}"
+                    )
                 return antwort.get("result")
 
     def schliessen(self) -> None:
@@ -1704,6 +1714,12 @@ def licht_pruefen(
 # ---------------------------------------------------------------------------
 
 DASHBOARD_URL = "kaffee-konrad"  # Dashboards brauchen einen Bindestrich im Pfad
+REITER_PFAD = "kaffee-konrad"  # Pfad der Konrad-Ansicht als Reiter in anderen Dashboards
+REITER_KENNZEICHEN = "kaffee_dashboard"  # so erkennt das Skript seinen eigenen Reiter wieder
+WEITERE_DASHBOARDS = "weitere_dashboards"  # Schlüssel im Konrad-Dashboard: wo der Reiter sonst noch liegt
+STANDARD_DASHBOARD = "lovelace"  # so heißt das Standard-Dashboard „Übersicht“ in der API
+AUCH_AUTO = "auto"  # --auch-in ohne Wert: Dashboards zur Auswahl anbieten
+AUCH_AUS = "aus"  # --auch-in aus: Reiter wieder entfernen
 SKRIPT_ZUBEREITEN = "kaffee_zubereiten"
 SKRIPT_SPEICHERN = "lieblingsgetraenk_speichern"
 SKRIPT_LIEBLING = "lieblingsgetraenk_zubereiten"
@@ -1813,6 +1829,7 @@ OPTIONEN = (
 )
 NUR_WENN_VORHANDEN = ("bohnen", "heisswasser")  # Helfer nur, wenn die Maschine die Option hat
 WARTUNG = re.compile(r"descal|calc_n_clean|water_tank|bean_container_empty|drip_tray|milk_tank|clean|rinse")
+WARTUNG_IMMER = ("water_tank_empty", "bean_container_empty", "drip_tray_full")  # immer zu sehen, der Rest nur, wenn er anliegt
 ZAEHLER = re.compile(r"_counter$")
 WARTUNG_SYMBOLE = (  # Teil des Schlüssels → Symbol, Farbe
     ("water_tank", "mdi:water-alert", "blue"),
@@ -1966,6 +1983,114 @@ def dashboard_anlegen(ws: "WebSocket", url_path: str, titel: str, config: dict[s
         )
     ws.befehl(type="lovelace/config/save", url_path=url_path, config=config)
     return neu
+
+
+def dashboards_auflisten(ws: "WebSocket") -> list[tuple[str, str]]:
+    """(Pfad, Beschreibung) der Dashboards, in die sich ein Reiter legen lässt – ohne das Konrad-Dashboard.
+
+    YAML-Dashboards fehlen (sie lassen sich nicht per Skript ändern); die „Übersicht“ steht vorn.
+    """
+    liste = [(STANDARD_DASHBOARD, "„Übersicht“ (Standard-Dashboard)")]
+    for dashboard in ws.befehl(type="lovelace/dashboards/list") or []:
+        if not isinstance(dashboard, dict) or dashboard.get("url_path") in (DASHBOARD_URL, None):
+            continue
+        if dashboard.get("mode", "storage") != "storage":
+            continue
+        liste.append((dashboard["url_path"], f"„{dashboard.get('title') or dashboard['url_path']}“"))
+    return liste
+
+
+def _dashboard_konfiguration_lesen(ws: "WebSocket", url_path: str) -> dict[str, Any]:
+    """Die gespeicherte Konfiguration eines Dashboards – mit Erklärung, wenn es keine gibt."""
+    ziel = None if url_path == STANDARD_DASHBOARD else url_path
+    try:
+        config = ws.befehl(type="lovelace/config", url_path=ziel)
+    except WebSocketFehler as fehler:
+        if fehler.code == "config_not_found":
+            raise Abbruch(
+                f"Das Dashboard „{url_path}“ wird von Home Assistant automatisch erzeugt und lässt sich so nicht "
+                "ergänzen. Erst im Dashboard oben rechts auf den Stift tippen und „Steuerung übernehmen“ wählen, "
+                "dann das Skript erneut ausführen."
+            ) from fehler
+        raise
+    if not isinstance(config, dict) or "strategy" in config or not isinstance(config.get("views"), list):
+        raise Abbruch(
+            f"Das Dashboard „{url_path}“ wird automatisch zusammengestellt (Strategie) – ein Reiter lässt sich "
+            "nur in ein von Hand gestaltetes Dashboard legen."
+        )
+    return config
+
+
+def reiter_einfuegen(ws: "WebSocket", url_path: str, ansicht: dict[str, Any]) -> str:
+    """Legt die Konrad-Ansicht als Reiter in ein anderes Dashboard – oder erneuert den eigenen Reiter dort."""
+    config = _dashboard_konfiguration_lesen(ws, url_path)
+    reiter = {**ansicht, "path": REITER_PFAD, REITER_KENNZEICHEN: True}
+    ansichten = [a for a in config["views"] if isinstance(a, dict)]
+    eigene = [a for a in ansichten if a.get(REITER_KENNZEICHEN)]
+    if any(a.get("path") == REITER_PFAD for a in ansichten if not a.get(REITER_KENNZEICHEN)):
+        raise Abbruch(
+            f"Im Dashboard „{url_path}“ gibt es schon einen Reiter mit dem Pfad „{REITER_PFAD}“, der nicht vom "
+            "Skript stammt – bitte dort umbenennen."
+        )
+    config["views"] = [a for a in ansichten if not a.get(REITER_KENNZEICHEN)] + [reiter]
+    ws.befehl(type="lovelace/config/save", url_path=None if url_path == STANDARD_DASHBOARD else url_path, config=config)
+    return "aktualisiert" if eigene else "angelegt"
+
+
+def reiter_entfernen(ws: "WebSocket", url_path: str) -> bool:
+    """Nimmt den Konrad-Reiter aus einem Dashboard heraus; True, wenn es ihn gab."""
+    try:
+        config = _dashboard_konfiguration_lesen(ws, url_path)
+    except Abbruch:
+        return False
+    ansichten = [a for a in config["views"] if isinstance(a, dict)]
+    rest = [a for a in ansichten if not a.get(REITER_KENNZEICHEN)]
+    if len(rest) == len(ansichten):
+        return False
+    config["views"] = rest
+    ws.befehl(type="lovelace/config/save", url_path=None if url_path == STANDARD_DASHBOARD else url_path, config=config)
+    return True
+
+
+def gemerkte_dashboards(ws: "WebSocket") -> list[str]:
+    """Die Dashboards, in denen der Konrad-Reiter beim letzten Lauf lag (steht im Konrad-Dashboard)."""
+    try:
+        config = ws.befehl(type="lovelace/config", url_path=DASHBOARD_URL)
+    except Abbruch:
+        return []
+    gemerkt = (config or {}).get(WEITERE_DASHBOARDS) if isinstance(config, dict) else None
+    return [d for d in gemerkt if isinstance(d, str)] if isinstance(gemerkt, list) else []
+
+
+def auch_in_bestimmen(ws: "WebSocket", wunsch: Optional[str], gemerkt: list[str], interaktiv: bool) -> list[str]:
+    """In welche weiteren Dashboards der Konrad-Reiter soll: aus --auch-in, zur Auswahl oder wie gemerkt."""
+    if wunsch is None:
+        return gemerkt
+    if wunsch == AUCH_AUS:
+        return []
+    moeglich = dashboards_auflisten(ws)
+    if wunsch == AUCH_AUTO:
+        if not interaktiv:
+            raise Abbruch(
+                "--auch-in braucht ohne Terminal die Dashboards als Pfade, durch Komma getrennt, z. B. "
+                f"--auch-in {','.join(p for p, _ in moeglich[:2])}. Möglich sind: "
+                + ", ".join(f"{p} ({b})" for p, b in moeglich)
+            )
+        gewaehlt = menue(
+            "In welche weiteren Dashboards soll die Kaffeemaschine als Reiter? (mehrere möglich)",
+            [f"{beschreibung}  –  {pfad}" for pfad, beschreibung in moeglich],
+            mehrere=True,
+            optional=True,
+        )
+        return [moeglich[i][0] for i in gewaehlt]
+    ziele = [teil.strip().strip("/") for teil in wunsch.split(",") if teil.strip()]
+    unbekannt = [z for z in ziele if z not in {p for p, _ in moeglich}]
+    if unbekannt:
+        raise Abbruch(
+            f"Dashboard nicht gefunden: {', '.join(unbekannt)}. Möglich sind (Pfad aus der Adresszeile): "
+            + ", ".join(f"{p} ({b})" for p, b in moeglich)
+        )
+    return list(dict.fromkeys(ziele))
 
 
 def hinweis_aktion(text: str) -> dict[str, Any]:
@@ -2703,6 +2828,16 @@ def kachel(entity_id: str, name: str, icon: str, farbe: str, **mehr: Any) -> dic
     return {"type": "tile", "entity": entity_id, "name": name, "icon": icon, "color": farbe, **mehr}
 
 
+def wenn_verfuegbar(entity_id: str) -> list[dict[str, Any]]:
+    """Sichtbarkeit: nur, wenn die Entität nicht „nicht verfügbar“ meldet (Optionen, die das Getränk nicht hat)."""
+    return [{"condition": "state", "entity": entity_id, "state_not": "unavailable"}]
+
+
+def wenn_anliegend(entity_id: str) -> list[dict[str, Any]]:
+    """Sichtbarkeit: nur, wenn ein Hinweis anliegt (nicht aus, nicht unbekannt)."""
+    return [{"condition": "state", "entity": entity_id, "state_not": ["off", "unknown", "unavailable"]}]
+
+
 def skript_taste(skript: str, platz: str, rueckfrage: dict[str, str]) -> dict[str, Any]:
     return {
         "action": "perform-action",
@@ -2719,18 +2854,21 @@ def dashboard_konfiguration(
     plaetze_je_person: dict[str, dict[str, dict[str, str]]],
     weitere: dict[str, tuple[str, str]],
 ) -> dict[str, Any]:
-    """Das Dashboard: Lieblingsgetränke je Person, Getränk zusammenstellen, die Maschine direkt, Wartung, Zähler.
+    """Das Dashboard: Lieblingsgetränke und Getränk zusammenstellen, die Maschine direkt, Wartung und Zähler.
 
     Ganz oben, über alle Spalten, die Zeichnung der Maschine, animiert je Betriebszustand (siehe ``kopfkarte``).
+    Darunter drei etwa gleich hohe Abschnitte, damit auf breiten Bildschirmen keine Leerflächen
+    entstehen (die Sections-Ansicht legt Abschnitte in Reihen, jede so hoch wie ihr längster Abschnitt).
     ``weitere`` ordnet translation_keys weiterer Entitäten der Maschine (Wartungshinweise,
     Zähler) ihre Entitäts-ID und ihren Namen zu.
     """
     abschnitte: list[dict[str, Any]] = []
 
+    karten: list[dict[str, Any]] = []
+    if plaetze_je_person:
+        karten.append({"type": "heading", "heading": "Lieblingsgetränke", "heading_style": "title", "icon": "mdi:star"})
     for person, plaetze in plaetze_je_person.items():
-        karten: list[dict[str, Any]] = [
-            {"type": "heading", "heading": person, "heading_style": "title", "icon": "mdi:account-circle"}
-        ]
+        karten.append({"type": "heading", "heading": person, "heading_style": "subtitle", "icon": "mdi:account-circle"})
         for kennung, daten in plaetze.items():
             karten.append(
                 kachel(
@@ -2750,6 +2888,7 @@ def dashboard_konfiguration(
                     grid_options={"columns": 4, "rows": 2},
                 )
             )
+    if plaetze_je_person:
         karten.append(
             {
                 "type": "markdown",
@@ -2760,16 +2899,16 @@ def dashboard_konfiguration(
                 "grid_options": {"columns": "full"},
             }
         )
-        abschnitte.append({"type": "grid", "cards": karten})
 
-    zusammenstellen: list[dict[str, Any]] = [
+    zusammenstellen = karten  # im selben Abschnitt weiter: Getränk zusammenstellen
+    zusammenstellen.append(
         {
             "type": "heading",
             "heading": "Getränk zusammenstellen",
             "heading_style": "title",
             "icon": "mdi:coffee-maker",
         }
-    ]
+    )
     if helfer.get("getraenk"):
         zusammenstellen.append(
             kachel(
@@ -2842,7 +2981,14 @@ def dashboard_konfiguration(
         )
     if maschine.get("tassenwaermer"):
         direkt.append(
-            kachel(maschine["tassenwaermer"], "Tassenwärmer", "mdi:heat-wave", "orange", features=[{"type": "toggle"}])
+            kachel(
+                maschine["tassenwaermer"],
+                "Tassenwärmer",
+                "mdi:heat-wave",
+                "orange",
+                features=[{"type": "toggle"}],
+                visibility=wenn_verfuegbar(maschine["tassenwaermer"]),
+            )
         )
     if maschine.get("zustand"):
         direkt.append(kachel(maschine["zustand"], "Zustand", "mdi:state-machine", "brown"))
@@ -2913,9 +3059,19 @@ def dashboard_konfiguration(
                 grid_options={"columns": "full"},
             )
         )
+    # Optionen gibt es nur für das gewählte Getränk – was die Maschine nicht anbietet, bleibt unsichtbar.
     for kurz, name, _, _, symbol, farbe in OPTIONEN:
         if maschine.get(kurz):
-            direkt.append(kachel(maschine[kurz], name, symbol, farbe, features=[{"type": "select-options"}]))
+            direkt.append(
+                kachel(
+                    maschine[kurz],
+                    name,
+                    symbol,
+                    farbe,
+                    features=[{"type": "select-options"}],
+                    visibility=wenn_verfuegbar(maschine[kurz]),
+                )
+            )
     if maschine.get("menge"):
         direkt.append(
             kachel(
@@ -2925,6 +3081,7 @@ def dashboard_konfiguration(
                 "blue",
                 features=[{"type": "numeric-input", "style": "slider"}],
                 grid_options={"columns": "full"},
+                visibility=wenn_verfuegbar(maschine["menge"]),
             )
         )
     if maschine.get("doppelt"):
@@ -2935,16 +3092,14 @@ def dashboard_konfiguration(
                 "mdi:numeric-2-box-multiple",
                 "amber",
                 features=[{"type": "toggle"}],
+                visibility=wenn_verfuegbar(maschine["doppelt"]),
             )
         )
     abschnitte.append({"type": "grid", "cards": direkt})
 
-    wartung: list[dict[str, Any]] = [
-        {"type": "heading", "heading": "Wartung", "heading_style": "title", "icon": "mdi:wrench"}
-    ]
-    zaehler: list[dict[str, Any]] = [
-        {"type": "heading", "heading": "Zähler", "heading_style": "title", "icon": "mdi:counter"}
-    ]
+    # Wartung und Zähler in einem Abschnitt; Hinweise bis auf Wassertank, Bohnen und Tropfschale nur, wenn sie anliegen.
+    wartung: list[dict[str, Any]] = []
+    zaehler: list[dict[str, Any]] = []
     for schluessel, (entity_id, name) in sorted(weitere.items()):
         if ZAEHLER.search(schluessel):
             zaehler.append(kachel(entity_id, name, "mdi:counter", "brown"))
@@ -2952,11 +3107,19 @@ def dashboard_konfiguration(
             symbol, farbe = next(
                 ((s, f) for teil, s, f in WARTUNG_SYMBOLE if teil in schluessel), ("mdi:alert-circle", "orange")
             )
-            wartung.append(kachel(entity_id, name, symbol, farbe))
-    if len(wartung) > 1:
-        abschnitte.append({"type": "grid", "cards": wartung})
-    if len(zaehler) > 1:
-        abschnitte.append({"type": "grid", "cards": zaehler})
+            if schluessel in WARTUNG_IMMER:
+                wartung.append(kachel(entity_id, name, symbol, farbe))
+            else:
+                wartung.append(kachel(entity_id, name, symbol, farbe, visibility=wenn_anliegend(entity_id)))
+    pflege: list[dict[str, Any]] = []
+    if wartung:
+        pflege.append({"type": "heading", "heading": "Wartung", "heading_style": "title", "icon": "mdi:wrench"})
+        pflege.extend(wartung)
+    if zaehler:
+        pflege.append({"type": "heading", "heading": "Zähler", "heading_style": "title", "icon": "mdi:counter"})
+        pflege.extend(zaehler)
+    if pflege:
+        abschnitte.append({"type": "grid", "cards": pflege})
 
     badges: list[dict[str, Any]] = []
     if maschine.get("zustand"):
@@ -3210,6 +3373,8 @@ def getraenke_einrichten(
         print(json.dumps(skripte, indent=2, ensure_ascii=False))
         print("\nUnd dieses Dashboard (eingebettete Bilder gekürzt):")
         print(json.dumps(ohne_bilder(dashboard), indent=2, ensure_ascii=False))
+        if args.auch_in and args.auch_in not in (AUCH_AUTO, AUCH_AUS):
+            print(f"\nDie Ansicht käme außerdem als Reiter in: {args.auch_in}")
         return 0
 
     for kennung, config in skripte.items():
@@ -3217,10 +3382,25 @@ def getraenke_einrichten(
     print("✓ 3 Skripte angelegt bzw. aktualisiert: " + ", ".join(f"script.{k}" for k in skripte))
     ws = WebSocket(ha.url, ha.token)
     try:
+        gemerkt = gemerkte_dashboards(ws)
+        ziele = auch_in_bestimmen(ws, args.auch_in, gemerkt, interaktiv)
+        gelungen: list[str] = []
+        for ziel in ziele:
+            try:
+                ergebnis = reiter_einfuegen(ws, ziel, dashboard["views"][0])
+            except Abbruch as fehler:
+                print(f"⚠ Kein Reiter im Dashboard „{ziel}“: {fehler}")
+                continue
+            gelungen.append(ziel)
+            print(f"✓ Reiter „{maschine_name}“ im Dashboard „{ziel}“ {ergebnis}")
+        for ziel in gemerkt:
+            if ziel not in gelungen and reiter_entfernen(ws, ziel):
+                print(f"✓ Reiter „{maschine_name}“ aus dem Dashboard „{ziel}“ entfernt")
+        dashboard[WEITERE_DASHBOARDS] = gelungen  # beim nächsten Lauf werden diese Reiter mit erneuert
         neu = dashboard_anlegen(ws, DASHBOARD_URL, maschine_name, dashboard)
+        print(f"✓ Dashboard „{maschine_name}“ {'angelegt' if neu else 'aktualisiert'}: {ha.url}/{DASHBOARD_URL}")
     finally:
         ws.schliessen()
-    print(f"✓ Dashboard „{maschine_name}“ {'angelegt' if neu else 'aktualisiert'}: {ha.url}/{DASHBOARD_URL}")
 
     if eingeschaltet:
         ha.post_json("/api/services/switch/turn_off", {"entity_id": maschine["einschalter"]})
@@ -3409,6 +3589,17 @@ def argumente(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help=(
             f"Für --getraenke: Plätze für Lieblingsgetränke je Person (Standard {STANDARD_PLAETZE}, "
             f"höchstens {MAX_PLAETZE})"
+        ),
+    )
+    parser.add_argument(
+        "--auch-in",
+        nargs="?",
+        const=AUCH_AUTO,
+        metavar="DASHBOARDS",
+        help=(
+            "Für --getraenke: die Kaffeemaschine zusätzlich als Reiter in andere Dashboards legen, z. B. "
+            "haus,wand-wohnzimmer (der Pfad aus der Adresszeile; „lovelace“ ist die Übersicht). Ohne Wert zur "
+            "Auswahl. Die Wahl merkt sich das Skript; „aus“ entfernt die Reiter wieder"
         ),
     )
     parser.add_argument(

@@ -281,8 +281,12 @@ views:
   - type: grid
     cards:
     - type: heading
-      heading: Jens
+      heading: Lieblingsgetränke
       heading_style: title
+      icon: mdi:star
+    - type: heading
+      heading: Jens
+      heading_style: subtitle
       icon: mdi:account-circle
     - type: tile
       entity: input_text.lieblingsgetrank_jens_1
@@ -371,15 +375,9 @@ views:
       grid_options:
         columns: 4
         rows: 2
-    - type: markdown
-      content: Tippen bereitet das Getränk zu. Gedrückt halten speichert die aktuelle Zusammenstellung auf dem Platz.
-      grid_options:
-        columns: full
-  - type: grid
-    cards:
     - type: heading
       heading: Nicole
-      heading_style: title
+      heading_style: subtitle
       icon: mdi:account-circle
     - type: tile
       entity: input_text.lieblingsgetrank_nicole_1
@@ -472,8 +470,6 @@ views:
       content: Tippen bereitet das Getränk zu. Gedrückt halten speichert die aktuelle Zusammenstellung auf dem Platz.
       grid_options:
         columns: full
-  - type: grid
-    cards:
     - type: heading
       heading: Getränk zusammenstellen
       heading_style: title
@@ -646,6 +642,10 @@ views:
       color: brown
       features:
       - type: select-options
+      visibility:
+      - condition: state
+        entity: select.konrad_bohnenmenge
+        state_not: unavailable
     - type: tile
       entity: select.konrad_kaffee_temperatur
       name: Temperatur
@@ -653,6 +653,10 @@ views:
       color: red
       features:
       - type: select-options
+      visibility:
+      - condition: state
+        entity: select.konrad_kaffee_temperatur
+        state_not: unavailable
     - type: tile
       entity: select.konrad_kaffee_milch_verhaltnis
       name: Milchanteil
@@ -660,6 +664,10 @@ views:
       color: blue-grey
       features:
       - type: select-options
+      visibility:
+      - condition: state
+        entity: select.konrad_kaffee_milch_verhaltnis
+        state_not: unavailable
     - type: tile
       entity: select.konrad_durchflussrate
       name: Intensität
@@ -667,6 +675,10 @@ views:
       color: orange
       features:
       - type: select-options
+      visibility:
+      - condition: state
+        entity: select.konrad_durchflussrate
+        state_not: unavailable
     - type: tile
       entity: number.konrad_fullmenge
       name: Füllmenge
@@ -677,6 +689,10 @@ views:
         style: slider
       grid_options:
         columns: full
+      visibility:
+      - condition: state
+        entity: number.konrad_fullmenge
+        state_not: unavailable
     - type: tile
       entity: switch.konrad_mehrere_getranke
       name: Mehrere Getränke
@@ -684,6 +700,10 @@ views:
       color: amber
       features:
       - type: toggle
+      visibility:
+      - condition: state
+        entity: switch.konrad_mehrere_getranke
+        state_not: unavailable
   - type: grid
     cards:
     - type: heading
@@ -700,6 +720,13 @@ views:
       name: Entkalken des Geräts empfohlen
       icon: mdi:water-off
       color: deep-orange
+      visibility:
+      - condition: state
+        entity: sensor.konrad_entkalken_des_gerats_empfohlen
+        state_not:
+        - 'off'
+        - unknown
+        - unavailable
     - type: tile
       entity: sensor.konrad_tropfschale_voll
       name: Tropfschale voll
@@ -710,8 +737,6 @@ views:
       name: Wassertank leer
       icon: mdi:water-alert
       color: blue
-  - type: grid
-    cards:
     - type: heading
       heading: Zähler
       heading_style: title
