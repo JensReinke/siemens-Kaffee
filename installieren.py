@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import datetime
 import getpass
 import hashlib
@@ -1720,6 +1721,7 @@ WEITERE_DASHBOARDS = "weitere_dashboards"  # Schlüssel im Konrad-Dashboard: wo 
 STANDARD_DASHBOARD = "lovelace"  # so heißt das Standard-Dashboard „Übersicht“ in der API
 AUCH_AUTO = "auto"  # --auch-in ohne Wert: Dashboards zur Auswahl anbieten
 AUCH_AUS = "aus"  # --auch-in aus: Reiter wieder entfernen
+NAVBAR = "custom:navbar-card"  # Navigationsleiste aus HACS – dort kommt Konrad als Punkt hinein
 SKRIPT_ZUBEREITEN = "kaffee_zubereiten"
 SKRIPT_SPEICHERN = "lieblingsgetraenk_speichern"
 SKRIPT_LIEBLING = "lieblingsgetraenk_zubereiten"
@@ -2021,31 +2023,112 @@ def _dashboard_konfiguration_lesen(ws: "WebSocket", url_path: str) -> dict[str, 
     return config
 
 
+def _karten(objekt: Any) -> Iterator[dict[str, Any]]:
+    """Alle Karten eines Dashboards, auch verschachtelte (Abschnitte, Stapel, bedingte Karten)."""
+    if isinstance(objekt, dict):
+        if isinstance(objekt.get("type"), str):
+            yield objekt
+        for schluessel in ("views", "sections", "cards", "card"):
+            if schluessel in objekt:
+                yield from _karten(objekt[schluessel])
+    elif isinstance(objekt, list):
+        for eintrag in objekt:
+            yield from _karten(eintrag)
+
+
+def navbar_karten(ansichten: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [karte for karte in _karten(ansichten) if karte.get("type") == NAVBAR]
+
+
+def navbar_routen(config: dict[str, Any], karte: dict[str, Any]) -> Optional[list[Any]]:
+    """Die Routenliste, die für eine Navbar-Karte gilt: ihre Vorlage im Dashboard-Stamm oder ihre eigenen Routen."""
+    vorlage = karte.get("template")
+    if isinstance(vorlage, str):
+        einstellungen = config.get("navbar-card")
+        vorlagen = einstellungen.get("templates") if isinstance(einstellungen, dict) else None
+        eintrag = vorlagen.get(vorlage) if isinstance(vorlagen, dict) else None
+        if not isinstance(eintrag, dict):
+            return None
+        routen = eintrag.setdefault("routes", [])
+        return routen if isinstance(routen, list) else None
+    routen = karte.get("routes")
+    return routen if isinstance(routen, list) else None
+
+
+def _hat_url(routen: list[Any], url: str) -> bool:
+    for route in routen:
+        if not isinstance(route, dict):
+            continue
+        if route.get("url") == url:
+            return True
+        for unter in (route.get("popup"), route.get("submenu")):
+            if isinstance(unter, list) and _hat_url(unter, url):
+                return True
+    return False
+
+
+def navbar_route_einfuegen(config: dict[str, Any], ansichten: list[dict[str, Any]], url: str, label: str) -> bool:
+    """Hängt Konrad an jede zuständige Routenliste der Navbar-Karten an; True, wenn es eine Navbar gibt."""
+    karten = navbar_karten(ansichten)
+    gesehen: list[int] = []  # eine Vorlage gilt für viele Karten – nur einmal ergänzen
+    for karte in karten:
+        routen = navbar_routen(config, karte)
+        if routen is None or id(routen) in gesehen:
+            continue
+        gesehen.append(id(routen))
+        if not _hat_url(routen, url):
+            routen.append({"url": url, "icon": "mdi:coffee", "label": label})
+    return bool(karten)
+
+
+def navbar_route_entfernen(config: dict[str, Any], ansichten: list[dict[str, Any]], url: str) -> bool:
+    entfernt = False
+    for karte in navbar_karten(ansichten):
+        routen = navbar_routen(config, karte)
+        if routen is None:
+            continue
+        rest = [r for r in routen if not (isinstance(r, dict) and r.get("url") == url)]
+        if len(rest) != len(routen):
+            routen[:] = rest
+            entfernt = True
+    return entfernt
+
+
 def reiter_einfuegen(ws: "WebSocket", url_path: str, ansicht: dict[str, Any]) -> str:
-    """Legt die Konrad-Ansicht als Reiter in ein anderes Dashboard – oder erneuert den eigenen Reiter dort."""
+    """Legt die Konrad-Ansicht als Reiter in ein anderes Dashboard – oder erneuert den eigenen Reiter dort.
+
+    Hat das Dashboard eine Navbar Card, kommt Konrad auch dort als Punkt hinein, und der
+    Konrad-Reiter bekommt eine Kopie der Leiste, damit man von dort weiterkommt.
+    """
     config = _dashboard_konfiguration_lesen(ws, url_path)
-    reiter = {**ansicht, "path": REITER_PFAD, REITER_KENNZEICHEN: True}
     ansichten = [a for a in config["views"] if isinstance(a, dict)]
     eigene = [a for a in ansichten if a.get(REITER_KENNZEICHEN)]
-    if any(a.get("path") == REITER_PFAD for a in ansichten if not a.get(REITER_KENNZEICHEN)):
+    fremde = [a for a in ansichten if not a.get(REITER_KENNZEICHEN)]
+    if any(a.get("path") == REITER_PFAD for a in fremde):
         raise Abbruch(
             f"Im Dashboard „{url_path}“ gibt es schon einen Reiter mit dem Pfad „{REITER_PFAD}“, der nicht vom "
             "Skript stammt – bitte dort umbenennen."
         )
-    config["views"] = [a for a in ansichten if not a.get(REITER_KENNZEICHEN)] + [reiter]
+    mit_navbar = navbar_route_einfuegen(config, fremde, f"/{url_path}/{REITER_PFAD}", str(ansicht.get("title") or "Kaffee"))
+    reiter = {**ansicht, "path": REITER_PFAD, REITER_KENNZEICHEN: True}
+    if mit_navbar:
+        leiste = copy.deepcopy(navbar_karten(fremde)[0])
+        reiter["sections"] = list(ansicht.get("sections") or []) + [{"type": "grid", "cards": [leiste]}]
+    config["views"] = fremde + [reiter]
     ws.befehl(type="lovelace/config/save", url_path=None if url_path == STANDARD_DASHBOARD else url_path, config=config)
-    return "aktualisiert" if eigene else "angelegt"
+    return ("aktualisiert" if eigene else "angelegt") + (", auch in der Navigationsleiste" if mit_navbar else "")
 
 
 def reiter_entfernen(ws: "WebSocket", url_path: str) -> bool:
-    """Nimmt den Konrad-Reiter aus einem Dashboard heraus; True, wenn es ihn gab."""
+    """Nimmt den Konrad-Reiter (und seinen Punkt in der Navbar Card) aus einem Dashboard heraus; True, wenn es ihn gab."""
     try:
         config = _dashboard_konfiguration_lesen(ws, url_path)
     except Abbruch:
         return False
     ansichten = [a for a in config["views"] if isinstance(a, dict)]
     rest = [a for a in ansichten if not a.get(REITER_KENNZEICHEN)]
-    if len(rest) == len(ansichten):
+    entfernt = navbar_route_entfernen(config, rest, f"/{url_path}/{REITER_PFAD}")
+    if len(rest) == len(ansichten) and not entfernt:
         return False
     config["views"] = rest
     ws.befehl(type="lovelace/config/save", url_path=None if url_path == STANDARD_DASHBOARD else url_path, config=config)

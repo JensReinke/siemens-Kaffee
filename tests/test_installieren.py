@@ -3576,3 +3576,136 @@ async def test_nur_anzeigen_mit_auch_in(
     assert f"Die Ansicht käme außerdem als Reiter in: {WANDTABLET}" in ausgabe
     config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=WANDTABLET)
     assert config["views"] == [ALLE_GERAETE]
+
+
+
+# --- Konrad in der Navbar Card (Leiste unten) ---------------------------------
+
+HAUS = "haus-uebersicht"
+ZURUECK = {"icon": "mdi:arrow-left", "tap_action": {"action": "navigate-back"}}
+KONRAD_ROUTE = {"url": f"/{HAUS}/kaffee-konrad", "icon": "mdi:coffee", "label": "Kaffeevollautomat"}
+
+
+def navbar(**mehr: Any) -> dict[str, Any]:
+    return {"type": "custom:navbar-card", "desktop": {"position": "bottom", "show_labels": True}, **mehr}
+
+
+def routen(*ziele: str) -> list[dict[str, Any]]:
+    return [ZURUECK] + [{"url": f"/{HAUS}/{z}", "icon": "mdi:home", "label": z.capitalize()} for z in ziele]
+
+
+async def haus_anlegen(hass_ws_client: WebSocketGenerator, hass: HomeAssistant, config: dict[str, Any]) -> None:
+    await ws_befehl(
+        hass_ws_client, hass, type="lovelace/dashboards/create", url_path=HAUS, title="Haus", icon="mdi:home",
+        show_in_sidebar=True, require_admin=False,
+    )
+    await ws_befehl(hass_ws_client, hass, type="lovelace/config/save", url_path=HAUS, config=config)
+
+
+async def haus_config(hass_ws_client: WebSocketGenerator, hass: HomeAssistant) -> dict[str, Any]:
+    return await ws_befehl(hass_ws_client, hass, type="lovelace/config", url_path=HAUS)
+
+
+async def test_konrad_in_der_navbar_card(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Jede Navbar-Karte mit eigenen Routen bekommt Konrad als Punkt, der Konrad-Reiter eine Kopie der Leiste."""
+    uebersicht = {
+        "title": "Übersicht", "path": "uebersicht",
+        "cards": [{"type": "vertical-stack", "cards": [{"type": "markdown", "content": "Haus"}, navbar(routes=routen("uebersicht", "licht"))]}],
+    }
+    licht = {"title": "Licht", "path": "licht", "type": "sections", "sections": [{"type": "grid", "cards": [navbar(routes=routen("uebersicht", "licht"))]}]}
+    await haus_anlegen(hass_ws_client, home_assistant, {"views": [uebersicht, licht]})
+
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", HAUS
+    )
+    assert code == 0, fehler
+    assert f"✓ Reiter „Kaffeevollautomat“ im Dashboard „{HAUS}“ angelegt, auch in der Navigationsleiste" in ausgabe
+    config = await haus_config(hass_ws_client, home_assistant)
+    assert [v["title"] for v in config["views"]] == ["Übersicht", "Licht", "Kaffeevollautomat"]
+    assert config["views"][0]["cards"][0]["cards"][1]["routes"] == routen("uebersicht", "licht") + [KONRAD_ROUTE]
+    assert config["views"][1]["sections"][0]["cards"][0]["routes"] == routen("uebersicht", "licht") + [KONRAD_ROUTE]
+    reiter = config["views"][2]
+    leiste = reiter["sections"][-1]["cards"][0]
+    assert leiste["type"] == "custom:navbar-card" and leiste["routes"][-1] == KONRAD_ROUTE
+    assert reiter["sections"][:-1] == (await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=installieren.DASHBOARD_URL))["views"][0]["sections"]
+
+    # Zweiter Lauf: nichts verdoppelt sich.
+    code, ausgabe, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, "--personen", "Jens")
+    assert code == 0, fehler
+    assert f"im Dashboard „{HAUS}“ aktualisiert, auch in der Navigationsleiste" in ausgabe
+    config = await haus_config(hass_ws_client, home_assistant)
+    assert [v["title"] for v in config["views"]] == ["Übersicht", "Licht", "Kaffeevollautomat"]
+    assert config["views"][0]["cards"][0]["cards"][1]["routes"] == routen("uebersicht", "licht") + [KONRAD_ROUTE]
+    assert len(config["views"][2]["sections"][-1]["cards"]) == 1
+
+    # Aus: Punkt und Reiter verschwinden, der Rest bleibt, wie er war.
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", "aus"
+    )
+    assert code == 0, fehler
+    assert f"✓ Reiter „Kaffeevollautomat“ aus dem Dashboard „{HAUS}“ entfernt" in ausgabe
+    assert (await haus_config(hass_ws_client, home_assistant))["views"] == [uebersicht, licht]
+
+
+async def test_konrad_in_der_navbar_vorlage(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Bei einer Vorlage im Dashboard-Stamm wird nur sie ergänzt – die Karten selbst bleiben unverändert."""
+    ansichten = [
+        {"title": "Übersicht", "path": "uebersicht", "cards": [navbar(template="haupt")]},
+        {"title": "Licht", "path": "licht", "cards": [navbar(template="haupt")]},
+    ]
+    vorlage = {"navbar-card": {"templates": {"haupt": {"routes": routen("uebersicht", "licht"), "desktop": {"position": "bottom"}}}}}
+    await haus_anlegen(hass_ws_client, home_assistant, {**vorlage, "views": ansichten})
+
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", HAUS
+    )
+    assert code == 0, fehler
+    assert "auch in der Navigationsleiste" in ausgabe
+    config = await haus_config(hass_ws_client, home_assistant)
+    assert config["navbar-card"]["templates"]["haupt"]["routes"] == routen("uebersicht", "licht") + [KONRAD_ROUTE]
+    assert config["navbar-card"]["templates"]["haupt"]["desktop"] == {"position": "bottom"}
+    assert config["views"][0]["cards"] == [navbar(template="haupt")] and "routes" not in config["views"][0]["cards"][0]
+    assert config["views"][2]["sections"][-1]["cards"] == [navbar(template="haupt")]
+
+    code, _, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens", "--auch-in", "aus"
+    )
+    assert code == 0, fehler
+    config = await haus_config(hass_ws_client, home_assistant)
+    assert config["navbar-card"]["templates"]["haupt"]["routes"] == routen("uebersicht", "licht")
+    assert config["views"] == ansichten
+
+
+def test_navbar_route_einfuegen_und_entfernen() -> None:
+    """Ohne Navbar passiert nichts; ein Untermenü mit der URL zählt; die Übersicht heißt in der URL „lovelace“."""
+    url = "/lovelace/kaffee-konrad"
+    ohne = [{"title": "A", "cards": [{"type": "markdown", "content": "x"}]}]
+    assert installieren.navbar_route_einfuegen({}, ohne, url, "Konrad") is False
+    assert ohne == [{"title": "A", "cards": [{"type": "markdown", "content": "x"}]}]
+    karte = {"type": "custom:navbar-card", "routes": [{"icon": "mdi:menu", "popup": [{"url": url, "icon": "mdi:coffee"}]}]}
+    mit = [{"title": "A", "cards": [{"type": "conditional", "conditions": [], "card": karte}]}]
+    assert installieren.navbar_route_einfuegen({}, mit, url, "Konrad") is True
+    assert karte["routes"] == [{"icon": "mdi:menu", "popup": [{"url": url, "icon": "mdi:coffee"}]}]  # schon drin
+    karte["routes"] = []
+    assert installieren.navbar_route_einfuegen({}, mit, url, "Konrad") is True
+    assert karte["routes"] == [{"url": url, "icon": "mdi:coffee", "label": "Konrad"}]
+    assert installieren.navbar_route_entfernen({}, mit, url) is True and karte["routes"] == []
+    assert installieren.navbar_route_entfernen({}, mit, url) is False
+    # Eine Vorlage, die es nicht gibt, bleibt unangetastet.
+    fremd = [{"title": "A", "cards": [{"type": "custom:navbar-card", "template": "fehlt"}]}]
+    assert installieren.navbar_route_einfuegen({}, fremd, url, "Konrad") is True
+    assert fremd[0]["cards"][0] == {"type": "custom:navbar-card", "template": "fehlt"}
