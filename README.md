@@ -197,8 +197,9 @@ python3 installieren.py --getraenke --personen Jens,Nicole --auch-in
 
 zeigt die vorhandenen Dashboards zur Auswahl (mehrere möglich), merkt sich die
 Wahl und erneuert die Reiter bei jedem weiteren Lauf mit. Hat ein Dashboard eine
-Navigationsleiste aus HACS (Navbar Card), kommt die Kaffeemaschine auch dort als
-Punkt hinein, und der neue Reiter bekommt dieselbe Leiste; findet das Skript
+Navigationsleiste (Navbar Card aus HACS oder eine selbstgebaute Leiste aus
+Button-Cards), kommt die Kaffeemaschine auch dort als Punkt hinein, und der neue
+Reiter bekommt dieselbe Leiste; findet das Skript
 keine, nennt es die Karten, die es gesehen hat, und `--dashboard-zeigen` zeigt
 den ganzen Aufbau. Die Übersicht lässt
 sich erst ergänzen, wenn sie nicht mehr automatisch erzeugt wird (Stift →

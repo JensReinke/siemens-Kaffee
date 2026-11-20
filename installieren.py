@@ -1723,6 +1723,7 @@ AUCH_AUTO = "auto"  # --auch-in ohne Wert: Dashboards zur Auswahl anbieten
 AUCH_AUS = "aus"  # --auch-in aus: Reiter wieder entfernen
 NAVBAR = "navbar"  # Teil des Kartentyps einer Navigationsleiste (custom:navbar-card u. ä.) – dort kommt Konrad hinein
 DECLUTTERING = "custom:decluttering-card"  # Karte, die eine Vorlage aus decluttering_templates einsetzt
+BUTTON_CARD = "custom:button-card"  # daraus sind selbstgebaute Leisten: eine Button-Card mit Navigations-Knöpfen darin
 SKRIPT_ZUBEREITEN = "kaffee_zubereiten"
 SKRIPT_SPEICHERN = "lieblingsgetraenk_speichern"
 SKRIPT_LIEBLING = "lieblingsgetraenk_zubereiten"
@@ -2117,7 +2118,10 @@ def navbar_route_einfuegen(config: dict[str, Any], ansichten: list[dict[str, Any
     for routen in listen:
         if not _hat_url(routen, url):
             routen.append({"url": url, "icon": "mdi:coffee", "label": label})
-    return bool(listen) or bool(navbar_karten(ansichten))
+    leisten = leisten_karten(ansichten) + leisten_karten(stamm_von(config))
+    for leiste in leisten:
+        leiste_feld_einfuegen(leiste, url, label)
+    return bool(listen) or bool(navbar_karten(ansichten)) or bool(leisten)
 
 
 def navbar_route_entfernen(config: dict[str, Any], ansichten: list[dict[str, Any]], url: str) -> bool:
@@ -2127,21 +2131,149 @@ def navbar_route_entfernen(config: dict[str, Any], ansichten: list[dict[str, Any
         if len(rest) != len(routen):
             routen[:] = rest
             entfernt = True
+    for leiste in leisten_karten(ansichten) + leisten_karten(stamm_von(config)):
+        entfernt = leiste_feld_entfernen(leiste, url) or entfernt
     return entfernt
 
 
-def navbar_kopie(config: dict[str, Any], ansichten: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Die Karte, die die Leiste auf den Konrad-Reiter bringt: die erste Navbar-Karte einer Ansicht –
-    oder, wenn die Leiste nur in einer Decluttering-Vorlage steckt, die erste Karte, die diese Vorlage einsetzt."""
-    karten = navbar_karten(ansichten)
+def _navigiert(karte: dict[str, Any]) -> Optional[str]:
+    """Das Ziel einer Karte, die beim Tippen navigiert – sonst None."""
+    aktion = karte.get("tap_action")
+    if isinstance(aktion, dict) and aktion.get("action") == "navigate" and isinstance(aktion.get("navigation_path"), str):
+        return aktion["navigation_path"]
+    return None
+
+
+def _feldkarte(feld: Any) -> Optional[dict[str, Any]]:
+    """Die Karte in einem custom_field einer Button-Card (``{card: …}`` oder die Karte selbst)."""
+    if isinstance(feld, dict):
+        if isinstance(feld.get("card"), dict):
+            return feld["card"]
+        if isinstance(feld.get("type"), str):
+            return feld
+    return None
+
+
+def ist_leiste(karte: dict[str, Any]) -> bool:
+    """Eine selbstgebaute Navigationsleiste: eine Button-Card mit mindestens drei Button-Cards darin, die navigieren."""
+    if karte.get("type") != BUTTON_CARD or not isinstance(karte.get("custom_fields"), dict):
+        return False
+    knoepfe = [k for k in _karten(karte["custom_fields"]) if k.get("type") == BUTTON_CARD and _navigiert(k)]
+    return len(knoepfe) >= 3
+
+
+def leisten_karten(objekt: Any) -> list[dict[str, Any]]:
+    return [karte for karte in _karten(objekt) if ist_leiste(karte)]
+
+
+def _raster(karte: dict[str, Any]) -> list[dict[str, Any]]:
+    """Die Rastereinträge (grid-template-areas, grid-template-columns …) in den Styles einer Button-Card."""
+    styles = karte.get("styles")
+    grid = styles.get("grid") if isinstance(styles, dict) else None
+    if isinstance(grid, dict):
+        return [grid]
+    if isinstance(grid, list):
+        return [eintrag for eintrag in grid if isinstance(eintrag, dict)]
+    return []
+
+
+def _raster_erweitern(karte: dict[str, Any], vorlage: str, neu: str) -> None:
+    """Macht im Raster der Leiste hinter ``vorlage`` Platz für ``neu`` (Bereiche und Spalten)."""
+    for eintrag in _raster(karte):
+        bereiche = eintrag.get("grid-template-areas")
+        if isinstance(bereiche, str):
+            eintrag["grid-template-areas"] = re.sub(rf"\b{re.escape(vorlage)}\b", f"{vorlage} {neu}", bereiche)
+        spalten = eintrag.get("grid-template-columns")
+        if isinstance(spalten, str):
+            treffer = re.fullmatch(r"\s*repeat\(\s*(\d+)\s*,(.*)\)\s*", spalten)
+            if treffer:
+                eintrag["grid-template-columns"] = f"repeat({int(treffer.group(1)) + 1},{treffer.group(2)})"
+            elif len(spalten.split()) > 1:
+                eintrag["grid-template-columns"] = spalten + " " + spalten.split()[-1]
+
+
+def _raster_verkleinern(karte: dict[str, Any], name: str) -> None:
+    for eintrag in _raster(karte):
+        bereiche = eintrag.get("grid-template-areas")
+        if isinstance(bereiche, str):
+            eintrag["grid-template-areas"] = re.sub(rf"\s*\b{re.escape(name)}\b", "", bereiche)
+        spalten = eintrag.get("grid-template-columns")
+        if isinstance(spalten, str):
+            treffer = re.fullmatch(r"\s*repeat\(\s*(\d+)\s*,(.*)\)\s*", spalten)
+            if treffer and int(treffer.group(1)) > 1:
+                eintrag["grid-template-columns"] = f"repeat({int(treffer.group(1)) - 1},{treffer.group(2)})"
+            elif len(spalten.split()) > 1:
+                eintrag["grid-template-columns"] = " ".join(spalten.split()[:-1])
+
+
+def leiste_feld_einfuegen(karte: dict[str, Any], url: str, label: str) -> bool:
+    """Hängt Konrad als Knopf an eine Leiste aus Button-Cards: eine Kopie des letzten Knopfs, der navigiert,
+    mit Kaffeetasse und Ziel ``url``; das Raster bekommt eine Spalte mehr. True, wenn Konrad danach drin ist."""
+    felder = karte.get("custom_fields")
+    if not isinstance(felder, dict):
+        return False
+    vorlage = None
+    for name, feld in felder.items():
+        kind = _feldkarte(feld)
+        if kind is None:
+            continue
+        if _navigiert(kind) == url:
+            return True
+        if kind.get("type") == BUTTON_CARD and _navigiert(kind):
+            vorlage = name
+    if vorlage is None:
+        return False
+    neu_name = slug(label) or "kaffee"
+    while neu_name in felder:
+        neu_name += "_"
+    neu = copy.deepcopy(felder[vorlage])
+    kind = _feldkarte(neu)
+    assert kind is not None
+    kind["name"] = label
+    kind["icon"] = "mdi:coffee"
+    kind["tap_action"] = {**kind["tap_action"], "navigation_path": url}
+    felder[neu_name] = neu
+    styles = karte.get("styles")
+    if isinstance(styles, dict) and isinstance(styles.get("custom_fields"), dict) and vorlage in styles["custom_fields"]:
+        styles["custom_fields"][neu_name] = copy.deepcopy(styles["custom_fields"][vorlage])
+    _raster_erweitern(karte, vorlage, neu_name)
+    return True
+
+
+def leiste_feld_entfernen(karte: dict[str, Any], url: str) -> bool:
+    felder = karte.get("custom_fields")
+    if not isinstance(felder, dict):
+        return False
+    for name, feld in list(felder.items()):
+        kind = _feldkarte(feld)
+        if kind is None or _navigiert(kind) != url:
+            continue
+        del felder[name]
+        styles = karte.get("styles")
+        if isinstance(styles, dict) and isinstance(styles.get("custom_fields"), dict):
+            styles["custom_fields"].pop(name, None)
+        _raster_verkleinern(karte, name)
+        return True
+    return False
+
+
+def navbar_kopie(config: dict[str, Any], ansichten: list[dict[str, Any]]) -> Optional[tuple[dict[str, Any], str]]:
+    """Die Karte, die die Leiste auf den Konrad-Reiter bringt, und wo sie hingehört („badges“ oder „cards“):
+    die erste Navbar-Karte oder Button-Card-Leiste einer Ansicht – oder, wenn die Leiste nur in einer
+    Decluttering-Vorlage steckt, die erste Karte, die diese Vorlage einsetzt."""
+    karten = navbar_karten(ansichten) + leisten_karten(ansichten)
     if karten:
-        return copy.deepcopy(karten[0])
+        original = karten[0]
+        in_badges = any(
+            isinstance(a.get("badges"), list) and any(b is original for b in a["badges"]) for a in ansichten
+        )
+        return copy.deepcopy(original), "badges" if in_badges else "cards"
     vorlagen = config.get("decluttering_templates")
     if isinstance(vorlagen, dict):
-        mit_leiste = {name for name, inhalt in vorlagen.items() if navbar_karten(inhalt)}
+        mit_leiste = {name for name, inhalt in vorlagen.items() if navbar_karten(inhalt) or leisten_karten(inhalt)}
         for karte in _karten(ansichten):
             if karte.get("type") == DECLUTTERING and karte.get("template") in mit_leiste:
-                return copy.deepcopy(karte)
+                return copy.deepcopy(karte), "cards"
     return None
 
 
@@ -2154,6 +2286,8 @@ def dashboard_baum(config: dict[str, Any], url_path: str) -> str:
 
     def beschreibung(karte: dict[str, Any]) -> str:
         teile = [str(karte["type"])]
+        if ist_navbar(karte) or ist_leiste(karte):
+            teile.append("← Navigationsleiste")
         for schluessel in ("title", "name", "heading", "template", "path", "entity"):
             if isinstance(karte.get(schluessel), str):
                 teile.append(f"{schluessel}={karte[schluessel]}")
@@ -2194,6 +2328,11 @@ def dashboard_baum(config: dict[str, Any], url_path: str) -> str:
             + (" – vom Skript" if ansicht.get(REITER_KENNZEICHEN) else "")
         )
         zeilen.extend(zweige({k: v for k, v in ansicht.items() if k != "type"}, 1))
+    fremde = [a for a in config.get("views") or [] if isinstance(a, dict) and not a.get(REITER_KENNZEICHEN)]
+    leisten = navbar_karten(fremde) + leisten_karten(fremde)
+    if leisten:
+        zeilen.append("Navigationsleiste im Wortlaut (erste gefundene):")
+        zeilen.append(json.dumps(ohne_bilder(leisten[0]), indent=2, ensure_ascii=False))
     return "\n".join(zeilen)
 
 
@@ -2214,9 +2353,13 @@ def reiter_einfuegen(ws: "WebSocket", url_path: str, ansicht: dict[str, Any]) ->
         )
     mit_navbar = navbar_route_einfuegen(config, fremde, f"/{url_path}/{REITER_PFAD}", str(ansicht.get("title") or "Kaffee"))
     reiter = {**ansicht, "path": REITER_PFAD, REITER_KENNZEICHEN: True}
-    leiste = navbar_kopie(config, fremde) if mit_navbar else None
-    if leiste:
-        reiter["sections"] = list(ansicht.get("sections") or []) + [{"type": "grid", "cards": [leiste]}]
+    kopie = navbar_kopie(config, fremde) if mit_navbar else None
+    if kopie:
+        leiste, ort = kopie
+        if ort == "badges":  # die Leiste liegt bei den Badges der Ansicht (so sitzt sie fest am Rand)
+            reiter["badges"] = list(ansicht.get("badges") or []) + [leiste]
+        else:
+            reiter["sections"] = list(ansicht.get("sections") or []) + [{"type": "grid", "cards": [leiste]}]
     config["views"] = fremde + [reiter]
     ws.befehl(type="lovelace/config/save", url_path=None if url_path == STANDARD_DASHBOARD else url_path, config=config)
     ergebnis = "aktualisiert" if eigene else "angelegt"
