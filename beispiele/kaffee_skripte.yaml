@@ -1,0 +1,493 @@
+# Die drei Skripte zum Dashboard für die Kaffeemaschine – genau so legt sie
+#   python3 installieren.py --getraenke --personen Jens,Nicole
+# an. Zum Nachlesen oder von Hand (je Skript): Einstellungen → Automationen & Szenen → Skripte →
+# Skript erstellen → Neues Skript erstellen → Menü (⋮) → „In YAML bearbeiten“ → den Block unter
+# der Kennung (kaffee_zubereiten …) einfügen → Speichern.
+# kaffee_zubereiten: wählt das Getränk, setzt die Optionen, startet (mit Feldern für Dashboard und Assist).
+# lieblingsgetraenk_speichern / lieblingsgetraenk_zubereiten: ein Platz (z. B. jens_1) merkt sich die
+# Zusammenstellung als JSON in einem Textfeld und bereitet sie später wieder zu.
+# Die Entitäts-IDs (konrad_…, kaffee_…, lieblingsgetrank_…) und GERAETE_ID_VON_KONRAD heißen bei dir
+# anders – das Skript liest die echten aus Home Assistant; von Hand müssen sie angepasst werden.
+kaffee_zubereiten:
+  alias: Kaffee zubereiten
+  icon: mdi:coffee
+  mode: single
+  description: Wählt das Getränk an der Kaffeemaschine, setzt die gewünschten Optionen und startet. Ohne Angaben
+    gelten die Werte aus „Getränk zusammenstellen“ auf dem Dashboard.
+  fields:
+    getraenk:
+      name: Getränk
+      description: Name wie auf dem Dashboard, z. B. Cappuccino. Ohne Angabe gilt die Auswahl im Dashboard.
+      selector:
+        select:
+          options:
+          - Espresso
+          - Espresso Doppio
+          - Kaffee
+          - Caffè Grande
+          - XL-Kaffee
+          - Cappuccino
+          - Latte Macchiato
+          - Caffè Latte
+          - Milchschaum
+          - Warme Milch
+          - Heißwasser
+          - Ristretto
+          - Espresso Macchiato
+          - Kaffeekanne
+          - Verlängerter
+          - Kleiner Brauner
+          - Wiener Melange
+          - Flat White
+          - Café con Leche
+          - Café au Lait
+          - Koffie Verkeerd
+          - Americano
+          - Großer Brauner
+          - Verlängerter Braun
+          - Cortado
+          - Doppio
+          - Café Cortado
+          - Kaapi
+          - Galão
+          - Garoto
+          - Red Eye
+          - Black Eye
+          - Dead Eye
+          - Cold Brew
+          - Cold Brew Macchiato
+          custom_value: true
+    menge:
+      name: Menge in ml
+      description: 0 = wie an der Maschine; wird auf den Bereich des Getränks begrenzt.
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 5
+          unit_of_measurement: ml
+    doppelt:
+      name: Doppelt (zwei Tassen)
+      selector:
+        boolean: {}
+    staerke:
+      name: Stärke
+      description: „wie an der Maschine“ lässt die Einstellung der Maschine unangetastet.
+      selector:
+        select:
+          options:
+          - wie an der Maschine
+          - sehr mild
+          - mild
+          - mild+
+          - normal
+          - normal+
+          - stark
+          - stark+
+          - sehr stark
+          - sehr stark+
+          - extra stark
+          - Double Shot
+          - Double Shot+
+          - Double Shot++
+          - Triple Shot
+          - Triple Shot+
+          - Pulverkaffee
+    temperatur:
+      name: Temperatur
+      description: „wie an der Maschine“ lässt die Einstellung der Maschine unangetastet.
+      selector:
+        select:
+          options:
+          - wie an der Maschine
+          - 88 °C
+          - 90 °C
+          - 92 °C
+          - 94 °C
+          - 95 °C
+          - 96 °C
+    milch:
+      name: Milchanteil
+      description: „wie an der Maschine“ lässt die Einstellung der Maschine unangetastet.
+      selector:
+        select:
+          options:
+          - wie an der Maschine
+          - 10 %
+          - 20 %
+          - 25 %
+          - 30 %
+          - 40 %
+          - 50 %
+          - 55 %
+          - 60 %
+          - 65 %
+          - 67 %
+          - 70 %
+          - 75 %
+          - 80 %
+          - 85 %
+          - 90 %
+    intensitaet:
+      name: Intensität
+      description: „wie an der Maschine“ lässt die Einstellung der Maschine unangetastet.
+      selector:
+        select:
+          options:
+          - wie an der Maschine
+          - Normal
+          - Intensiv
+          - Intensiv+
+    bohnen:
+      name: Bohnenbehälter
+      description: „wie an der Maschine“ lässt die Einstellung der Maschine unangetastet.
+      selector:
+        select:
+          options:
+          - wie an der Maschine
+          - links
+          - rechts
+    heisswasser:
+      name: Heißwasser-Temperatur
+      description: „wie an der Maschine“ lässt die Einstellung der Maschine unangetastet.
+      selector:
+        select:
+          options:
+          - wie an der Maschine
+          - Weißer Tee
+          - Grüner Tee
+          - Schwarzer Tee
+          - 50 °C
+          - 55 °C
+          - 60 °C
+          - 65 °C
+          - 70 °C
+          - 75 °C
+          - 80 °C
+          - 85 °C
+          - 90 °C
+          - 95 °C
+          - 97 °C
+          - Maximal
+  variables:
+    getraenke:
+      Espresso: consumer_products_coffee_maker_program_beverage_espresso
+      Espresso Doppio: consumer_products_coffee_maker_program_beverage_espresso_doppio
+      Kaffee: consumer_products_coffee_maker_program_beverage_coffee
+      Caffè Grande: consumer_products_coffee_maker_program_beverage_caffe_grande
+      XL-Kaffee: consumer_products_coffee_maker_program_beverage_x_l_coffee
+      Cappuccino: consumer_products_coffee_maker_program_beverage_cappuccino
+      Latte Macchiato: consumer_products_coffee_maker_program_beverage_latte_macchiato
+      Caffè Latte: consumer_products_coffee_maker_program_beverage_caffe_latte
+      Milchschaum: consumer_products_coffee_maker_program_beverage_milk_froth
+      Warme Milch: consumer_products_coffee_maker_program_beverage_warm_milk
+      Heißwasser: consumer_products_coffee_maker_program_beverage_hot_water
+      Ristretto: consumer_products_coffee_maker_program_beverage_ristretto
+      Espresso Macchiato: consumer_products_coffee_maker_program_beverage_espresso_macchiato
+      Kaffeekanne: consumer_products_coffee_maker_program_beverage_coffee_pot
+      Verlängerter: consumer_products_coffee_maker_program_coffee_world_verlaengerter
+      Kleiner Brauner: consumer_products_coffee_maker_program_coffee_world_kleiner_brauner
+      Wiener Melange: consumer_products_coffee_maker_program_coffee_world_wiener_melange
+      Flat White: consumer_products_coffee_maker_program_coffee_world_flat_white
+      Café con Leche: consumer_products_coffee_maker_program_coffee_world_cafe_con_leche
+      Café au Lait: consumer_products_coffee_maker_program_coffee_world_cafe_au_lait
+      Koffie Verkeerd: consumer_products_coffee_maker_program_coffee_world_koffie_verkeerd
+      Americano: consumer_products_coffee_maker_program_coffee_world_americano
+      Großer Brauner: consumer_products_coffee_maker_program_coffee_world_grosser_brauner
+      Verlängerter Braun: consumer_products_coffee_maker_program_coffee_world_verlaengerter_braun
+      Cortado: consumer_products_coffee_maker_program_coffee_world_cortado
+      Doppio: consumer_products_coffee_maker_program_coffee_world_doppio
+      Café Cortado: consumer_products_coffee_maker_program_coffee_world_cafe_cortado
+      Kaapi: consumer_products_coffee_maker_program_coffee_world_kaapi
+      Galão: consumer_products_coffee_maker_program_coffee_world_galao
+      Garoto: consumer_products_coffee_maker_program_coffee_world_garoto
+      Red Eye: consumer_products_coffee_maker_program_coffee_world_red_eye
+      Black Eye: consumer_products_coffee_maker_program_coffee_world_black_eye
+      Dead Eye: consumer_products_coffee_maker_program_coffee_world_dead_eye
+      Cold Brew: consumer_products_coffee_maker_program_coffee_world_cold_brew
+      Cold Brew Macchiato: consumer_products_coffee_maker_program_coffee_world_cold_brew_macchiato
+    wunsch_getraenk: '{{ getraenk | default(states(''input_select.kaffee_getrank''), true) }}'
+    programm: '{{ getraenke.get(wunsch_getraenk, wunsch_getraenk) }}'
+    wunsch_menge: '{{ menge | default(states(''input_number.kaffee_menge'')) | float(0) | int }}'
+    wunsch_doppelt: '{{ doppelt | default(is_state(''input_boolean.kaffee_doppelt'', ''on'')) | bool(false) }}'
+    staerke_werte:
+      sehr mild: consumer_products_coffee_maker_enum_type_bean_amount_very_mild
+      mild: consumer_products_coffee_maker_enum_type_bean_amount_mild
+      mild+: consumer_products_coffee_maker_enum_type_bean_amount_mild_plus
+      normal: consumer_products_coffee_maker_enum_type_bean_amount_normal
+      normal+: consumer_products_coffee_maker_enum_type_bean_amount_normal_plus
+      stark: consumer_products_coffee_maker_enum_type_bean_amount_strong
+      stark+: consumer_products_coffee_maker_enum_type_bean_amount_strong_plus
+      sehr stark: consumer_products_coffee_maker_enum_type_bean_amount_very_strong
+      sehr stark+: consumer_products_coffee_maker_enum_type_bean_amount_very_strong_plus
+      extra stark: consumer_products_coffee_maker_enum_type_bean_amount_extra_strong
+      Double Shot: consumer_products_coffee_maker_enum_type_bean_amount_double_shot
+      Double Shot+: consumer_products_coffee_maker_enum_type_bean_amount_double_shot_plus
+      Double Shot++: consumer_products_coffee_maker_enum_type_bean_amount_double_shot_plus_plus
+      Triple Shot: consumer_products_coffee_maker_enum_type_bean_amount_triple_shot
+      Triple Shot+: consumer_products_coffee_maker_enum_type_bean_amount_triple_shot_plus
+      Pulverkaffee: consumer_products_coffee_maker_enum_type_bean_amount_coffee_ground
+    wunsch_staerke: '{{ staerke | default(states(''input_select.kaffee_starke''), true) }}'
+    temperatur_werte:
+      88 °C: consumer_products_coffee_maker_enum_type_coffee_temperature_88_c
+      90 °C: consumer_products_coffee_maker_enum_type_coffee_temperature_90_c
+      92 °C: consumer_products_coffee_maker_enum_type_coffee_temperature_92_c
+      94 °C: consumer_products_coffee_maker_enum_type_coffee_temperature_94_c
+      95 °C: consumer_products_coffee_maker_enum_type_coffee_temperature_95_c
+      96 °C: consumer_products_coffee_maker_enum_type_coffee_temperature_96_c
+    wunsch_temperatur: '{{ temperatur | default(states(''input_select.kaffee_temperatur''), true) }}'
+    milch_werte:
+      10 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_10_percent
+      20 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_20_percent
+      25 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_25_percent
+      30 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_30_percent
+      40 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_40_percent
+      50 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_50_percent
+      55 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_55_percent
+      60 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_60_percent
+      65 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_65_percent
+      67 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_67_percent
+      70 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_70_percent
+      75 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_75_percent
+      80 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_80_percent
+      85 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_85_percent
+      90 %: consumer_products_coffee_maker_enum_type_coffee_milk_ratio_90_percent
+    wunsch_milch: '{{ milch | default(states(''input_select.kaffee_milchanteil''), true) }}'
+    intensitaet_werte:
+      Normal: consumer_products_coffee_maker_enum_type_flow_rate_normal
+      Intensiv: consumer_products_coffee_maker_enum_type_flow_rate_intense
+      Intensiv+: consumer_products_coffee_maker_enum_type_flow_rate_intense_plus
+    wunsch_intensitaet: '{{ intensitaet | default(states(''input_select.kaffee_intensitat''), true) }}'
+    bohnen_werte:
+      links: consumer_products_coffee_maker_enum_type_bean_container_selection_left
+      rechts: consumer_products_coffee_maker_enum_type_bean_container_selection_right
+    wunsch_bohnen: '{{ bohnen | default('''', true) }}'
+    heisswasser_werte:
+      Weißer Tee: consumer_products_coffee_maker_enum_type_hot_water_temperature_white_tea
+      Grüner Tee: consumer_products_coffee_maker_enum_type_hot_water_temperature_green_tea
+      Schwarzer Tee: consumer_products_coffee_maker_enum_type_hot_water_temperature_black_tea
+      50 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_50_c
+      55 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_55_c
+      60 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_60_c
+      65 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_65_c
+      70 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_70_c
+      75 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_75_c
+      80 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_80_c
+      85 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_85_c
+      90 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_90_c
+      95 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_95_c
+      97 °C: consumer_products_coffee_maker_enum_type_hot_water_temperature_97_c
+      Maximal: consumer_products_coffee_maker_enum_type_hot_water_temperature_max
+    wunsch_heisswasser: '{{ heisswasser | default('''', true) }}'
+  sequence:
+  - if:
+    - condition: state
+      entity_id: binary_sensor.konrad_fernstart
+      state: 'off'
+    then:
+    - action: persistent_notification.create
+      data:
+        title: Kaffeemaschine
+        message: Fernstart ist an der Maschine nicht erlaubt – im Menü der Maschine „Fernstart“ einschalten.
+        notification_id: kaffee_dashboard
+    - stop: Fernstart nicht erlaubt
+  - if:
+    - condition: state
+      entity_id: switch.konrad_einschalter
+      state: 'off'
+    then:
+    - action: switch.turn_on
+      target:
+        entity_id: switch.konrad_einschalter
+    - wait_template: '{{ is_state(''sensor.konrad_betriebszustand'', ''ready'') }}'
+      timeout:
+        seconds: 90
+      continue_on_timeout: true
+  - action: home_connect.set_program_and_options
+    data:
+      device_id: GERAETE_ID_VON_KONRAD
+      affects_to: selected_program
+      program: '{{ programm }}'
+  - wait_template: '{{ is_state(''select.konrad_ausgewahltes_programm'', programm) }}'
+    timeout:
+      seconds: 10
+    continue_on_timeout: true
+  - delay:
+      seconds: 1
+  - if:
+    - condition: template
+      value_template: '{{ wunsch_staerke in staerke_werte and staerke_werte[wunsch_staerke] in (state_attr(''select.konrad_bohnenmenge'',
+        ''options'') or []) }}'
+    then:
+    - action: select.select_option
+      target:
+        entity_id: select.konrad_bohnenmenge
+      data:
+        option: '{{ staerke_werte[wunsch_staerke] }}'
+  - if:
+    - condition: template
+      value_template: '{{ wunsch_temperatur in temperatur_werte and temperatur_werte[wunsch_temperatur] in (state_attr(''select.konrad_kaffee_temperatur'',
+        ''options'') or []) }}'
+    then:
+    - action: select.select_option
+      target:
+        entity_id: select.konrad_kaffee_temperatur
+      data:
+        option: '{{ temperatur_werte[wunsch_temperatur] }}'
+  - if:
+    - condition: template
+      value_template: '{{ wunsch_milch in milch_werte and milch_werte[wunsch_milch] in (state_attr(''select.konrad_kaffee_milch_verhaltnis'',
+        ''options'') or []) }}'
+    then:
+    - action: select.select_option
+      target:
+        entity_id: select.konrad_kaffee_milch_verhaltnis
+      data:
+        option: '{{ milch_werte[wunsch_milch] }}'
+  - if:
+    - condition: template
+      value_template: '{{ wunsch_intensitaet in intensitaet_werte and intensitaet_werte[wunsch_intensitaet] in (state_attr(''select.konrad_durchflussrate'',
+        ''options'') or []) }}'
+    then:
+    - action: select.select_option
+      target:
+        entity_id: select.konrad_durchflussrate
+      data:
+        option: '{{ intensitaet_werte[wunsch_intensitaet] }}'
+  - if:
+    - condition: template
+      value_template: '{{ wunsch_menge > 0 and states(''number.konrad_fullmenge'') not in [''unknown'', ''unavailable'']
+        }}'
+    then:
+    - action: number.set_value
+      target:
+        entity_id: number.konrad_fullmenge
+      data:
+        value: '{{ [[wunsch_menge, state_attr(''number.konrad_fullmenge'', ''min'') | float(0)] | max, state_attr(''number.konrad_fullmenge'',
+          ''max'') | float(500)] | min }}'
+  - if:
+    - condition: template
+      value_template: '{{ states(''switch.konrad_mehrere_getranke'') not in [''unknown'', ''unavailable''] }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ wunsch_doppelt }}'
+      then:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.konrad_mehrere_getranke
+      else:
+      - action: switch.turn_off
+        target:
+          entity_id: switch.konrad_mehrere_getranke
+  - action: home_connect.start_selected_program
+    data:
+      device_id: GERAETE_ID_VON_KONRAD
+lieblingsgetraenk_speichern:
+  alias: Lieblingsgetränk speichern
+  icon: mdi:content-save
+  mode: parallel
+  description: Legt die aktuelle Zusammenstellung vom Dashboard auf einem Lieblingsgetränk-Platz ab.
+  fields: &id001
+    platz:
+      name: Platz
+      required: true
+      selector:
+        select:
+          options:
+          - label: Jens 1
+            value: jens_1
+          - label: Jens 2
+            value: jens_2
+          - label: Jens 3
+            value: jens_3
+          - label: Nicole 1
+            value: nicole_1
+          - label: Nicole 2
+            value: nicole_2
+          - label: Nicole 3
+            value: nicole_3
+  variables:
+    plaetze: &id002
+      jens_1:
+        name: input_text.lieblingsgetrank_jens_1
+        daten: input_text.lieblingsgetrank_jens_1_daten
+      jens_2:
+        name: input_text.lieblingsgetrank_jens_2
+        daten: input_text.lieblingsgetrank_jens_2_daten
+      jens_3:
+        name: input_text.lieblingsgetrank_jens_3
+        daten: input_text.lieblingsgetrank_jens_3_daten
+      nicole_1:
+        name: input_text.lieblingsgetrank_nicole_1
+        daten: input_text.lieblingsgetrank_nicole_1_daten
+      nicole_2:
+        name: input_text.lieblingsgetrank_nicole_2
+        daten: input_text.lieblingsgetrank_nicole_2_daten
+      nicole_3:
+        name: input_text.lieblingsgetrank_nicole_3
+        daten: input_text.lieblingsgetrank_nicole_3_daten
+    wie: wie an der Maschine
+    daten:
+      g: '{{ states(''input_select.kaffee_getrank'') }}'
+      m: '{{ states(''input_number.kaffee_menge'') | float(0) | int }}'
+      d: '{{ is_state(''input_boolean.kaffee_doppelt'', ''on'') }}'
+      s: '{{ states(''input_select.kaffee_starke'') }}'
+      t: '{{ states(''input_select.kaffee_temperatur'') }}'
+      mi: '{{ states(''input_select.kaffee_milchanteil'') }}'
+      i: '{{ states(''input_select.kaffee_intensitat'') }}'
+      b: wie an der Maschine
+      h: wie an der Maschine
+  sequence:
+  - variables:
+      beschreibung: '{% set ns = namespace(teile=[daten.g]) %}{% if daten.s != wie %}{% set ns.teile = ns.teile
+        + [daten.s] %}{% endif %}{% if daten.m | int(0) > 0 %}{% set ns.teile = ns.teile + [daten.m ~ '' ml''] %}{%
+        endif %}{% if daten.t != wie %}{% set ns.teile = ns.teile + [daten.t] %}{% endif %}{% if daten.mi != wie
+        %}{% set ns.teile = ns.teile + [''Milch '' ~ daten.mi] %}{% endif %}{% if daten.i != wie %}{% set ns.teile
+        = ns.teile + [daten.i] %}{% endif %}{% if daten.b != wie %}{% set ns.teile = ns.teile + [''Bohnen '' ~ daten.b]
+        %}{% endif %}{% if daten.h != wie %}{% set ns.teile = ns.teile + [''Wasser '' ~ daten.h] %}{% endif %}{%
+        if daten.d %}{% set ns.teile = ns.teile + [''doppelt''] %}{% endif %}{{ ns.teile | join('' · '') }}'
+  - action: input_text.set_value
+    target:
+      entity_id: '{{ plaetze[platz].daten }}'
+    data:
+      value: '{{ daten | to_json }}'
+  - action: input_text.set_value
+    target:
+      entity_id: '{{ plaetze[platz].name }}'
+    data:
+      value: '{{ beschreibung }}'
+lieblingsgetraenk_zubereiten:
+  alias: Lieblingsgetränk zubereiten
+  icon: mdi:coffee-to-go
+  mode: single
+  description: Bereitet das auf einem Platz gespeicherte Lieblingsgetränk zu.
+  fields: *id001
+  variables:
+    plaetze: *id002
+    roh: '{{ states(plaetze[platz].daten) }}'
+  sequence:
+  - if:
+    - condition: template
+      value_template: '{{ roh in ['''', ''unknown'', ''unavailable''] }}'
+    then:
+    - action: persistent_notification.create
+      data:
+        title: Kaffeemaschine
+        message: Auf diesem Platz ist noch kein Getränk gespeichert – erst „Getränk zusammenstellen“, dann die Taste
+          gedrückt halten.
+        notification_id: kaffee_dashboard
+    - stop: Platz leer
+  - variables:
+      f: '{{ roh | from_json }}'
+  - action: script.kaffee_zubereiten
+    data:
+      getraenk: '{{ f.g }}'
+      staerke: '{{ f.s }}'
+      menge: '{{ f.m }}'
+      temperatur: '{{ f.t }}'
+      milch: '{{ f.mi }}'
+      intensitaet: '{{ f.i }}'
+      bohnen: '{{ f.b }}'
+      heisswasser: '{{ f.h }}'
+      doppelt: '{{ f.d }}'

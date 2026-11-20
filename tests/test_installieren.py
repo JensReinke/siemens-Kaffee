@@ -5,10 +5,13 @@ Kaffeemaschine aus der Home-Connect-Integration nach und lassen das Skript
 dagegen laufen – mit Token und mit Benutzername/Passwort.
 """
 
+import argparse
+import json
 import os
 import re
 import sys
 from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -22,13 +25,17 @@ from aiohttp.test_utils import TestClient
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.auth import auth_provider_from_config
 from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.button import ButtonEntity
+from homeassistant.components.number import NumberEntity
+from homeassistant.components.select import SelectEntity
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry, ConfigFlow
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.setup import async_setup_component
 from homeassistant.util import slugify
@@ -41,7 +48,7 @@ from pytest_homeassistant_custom_component.common import (
     mock_integration,
     mock_platform,
 )
-from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator, WebSocketGenerator
 
 import installieren
 
@@ -122,6 +129,7 @@ async def home_connect_einrichten(
     variablen: dict[str, bool] | None = None,
     deaktiviert: set[str] = frozenset(),
     deaktivierte_schalter: set[tuple[str, str]] = frozenset(),
+    konrad: "Konrad | None" = None,
 ) -> MockConfigEntry:
     """Spielt Home Connect nach: Gerätename → (Modell, weitere Entitäten des Geräts).
 
@@ -130,12 +138,19 @@ async def home_connect_einrichten(
     nur im Entitätsregister. ``variablen`` (Name → an?) legt stellvertretend für
     CCU-Systemvariablen Binärsensoren an, die in ``deaktiviert`` von Anfang an
     deaktiviert sind; ``deaktivierte_schalter`` (Gerät, Schaltername) sind
-    Schalter, die von Anfang an deaktiviert sind. Gibt den Konfigurationseintrag
-    zurück.
+    Schalter, die von Anfang an deaktiviert sind. ``konrad`` ersetzt die Schalter des
+    Kaffeevollautomaten durch die vollständige Nachbildung der Kaffeemaschine (siehe
+    ``Konrad``) samt der Dienste home_connect.*. Gibt den Konfigurationseintrag zurück.
     """
-    plattformen = ["switch", "binary_sensor"]
+    plattformen = ["switch", "binary_sensor"] + (["select", "number", "sensor", "button"] if konrad else [])
+
+    def konrad_plattform(name: str) -> list[Entity]:
+        # Bei jedem (Neu-)Laden frische Entitäten – Home Assistant lässt kein zweites Hinzufügen zu.
+        return konrad_entitaeten(konrad)[name] if konrad else []
 
     async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+        if konrad:
+            konrad_dienste(hass, konrad)
         await hass.config_entries.async_forward_entry_setups(entry, plattformen)
         return True
 
@@ -146,15 +161,29 @@ async def home_connect_einrichten(
         hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
     ) -> None:
         async_add_entities(
-            HomeConnectSchalter(geraet, modell, name)
-            for geraet, (modell, _) in geraete.items()
-            for name in ("Einschalter", "Kindersicherung")
+            [
+                HomeConnectSchalter(geraet, modell, name)
+                for geraet, (modell, _) in geraete.items()
+                if not (konrad and geraet == "Kaffeevollautomat")
+                for name in ("Einschalter", "Kindersicherung")
+            ]
+            + konrad_plattform("switch")
         )
 
     async def async_setup_binary_sensor(
         hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
     ) -> None:
-        async_add_entities(Systemvariable(name, an) for name, an in (variablen or {}).items())
+        async_add_entities(
+            [Systemvariable(name, an) for name, an in (variablen or {}).items()] + konrad_plattform("binary_sensor")
+        )
+
+    def weitere_plattform(name: str) -> Callable[..., Awaitable[None]]:
+        async def async_setup(
+            hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+        ) -> None:
+            async_add_entities(konrad_plattform(name))
+
+        return async_setup
 
     mock_integration(
         hass,
@@ -171,6 +200,8 @@ async def home_connect_einrichten(
         f"{HOME_CONNECT}.binary_sensor",
         MockPlatform(async_setup_entry=async_setup_binary_sensor),
     )
+    for name in ("select", "number", "sensor", "button"):
+        mock_platform(hass, f"{HOME_CONNECT}.{name}", MockPlatform(async_setup_entry=weitere_plattform(name)))
     eintrag = MockConfigEntry(domain=HOME_CONNECT, title="Home Connect")
     eintrag.add_to_hass(hass)
     # Schon vor dem Laden im Register als deaktiviert eingetragen – so bekommt
@@ -234,11 +265,19 @@ async def deutsche_zeitzone(hass: HomeAssistant) -> None:
 
 
 @pytest.fixture
-async def home_assistant(hass: HomeAssistant, tmp_path: Path) -> HomeAssistant:
-    """Ein Home Assistant mit REST-API, Automations-Editor und eigenem Konfigurationsordner."""
+async def home_assistant(hass: HomeAssistant, tmp_path: Path, hass_storage: dict[str, Any]) -> HomeAssistant:
+    """Ein fertig eingerichtetes Home Assistant mit REST-API, Automations- und Skript-Editor, Helfern und Dashboards."""
     hass.config.config_dir = str(tmp_path)
-    (tmp_path / "configuration.yaml").write_text("automation: !include automations.yaml\n")
+    # Die Ersteinrichtung ist abgeschlossen – sonst lehnt die Anmeldung mit Passwort ab, sobald Dashboards geladen sind.
+    hass_storage["onboarding"] = {
+        "version": 4,
+        "minor_version": 1,
+        "key": "onboarding",
+        "data": {"done": ["user", "core_config", "analytics", "integration"]},
+    }
+    (tmp_path / "configuration.yaml").write_text("automation: !include automations.yaml\nscript: !include scripts.yaml\n")
     (tmp_path / "automations.yaml").write_text("[]\n")
+    (tmp_path / "scripts.yaml").write_text("{}\n")
     for komponente, config in (
         ("homeassistant", {}),  # u. a. die Dienste homeassistant.turn_on/turn_off
         ("auth", {}),
@@ -246,6 +285,13 @@ async def home_assistant(hass: HomeAssistant, tmp_path: Path) -> HomeAssistant:
         ("websocket_api", {}),
         ("config", {}),
         ("automation", {"automation": []}),
+        ("script", {"script": {}}),
+        ("input_select", {}),
+        ("input_number", {}),
+        ("input_boolean", {}),
+        ("input_text", {}),
+        ("lovelace", {}),
+        ("persistent_notification", {}),
     ):
         assert await async_setup_component(hass, komponente, config)
     await hass.async_block_till_done()
@@ -2568,3 +2614,662 @@ def test_lux(eingabe: str, erwartet: "int | float") -> None:
 def test_ungueltiger_lux(eingabe: str) -> None:
     with pytest.raises(Exception, match="Lux"):
         installieren.lux(eingabe)
+
+
+# --- Dashboard für die Kaffeemaschine (--getraenke) --------------------------
+
+KAFFEE_DASHBOARD = REPO / "beispiele" / "kaffee_dashboard.yaml"
+KAFFEE_SKRIPTE = REPO / "beispiele" / "kaffee_skripte.yaml"
+AKTIV = "select.kaffeevollautomat_aktives_programm"
+GEWAEHLT = "select.kaffeevollautomat_ausgewahltes_programm"
+BOHNENMENGE = "select.kaffeevollautomat_bohnenmenge"
+FUELLMENGE = "number.kaffeevollautomat_fullmenge"
+MEHRERE_GETRAENKE = "switch.kaffeevollautomat_mehrere_getranke"
+WASSERTANK = "sensor.kaffeevollautomat_wassertank_leer"
+GETRAENK = "input_select.kaffee_getrank"
+STAERKE = "input_select.kaffee_starke"
+MENGE = "input_number.kaffee_menge"
+DOPPELT = "input_boolean.kaffee_doppelt"
+JENS_1 = "input_text.lieblingsgetrank_jens_1"
+JENS_1_DATEN = "input_text.lieblingsgetrank_jens_1_daten"
+CAPPUCCINO = installieren.PROGRAMM_PRAEFIX + "beverage_cappuccino"
+ESPRESSO = installieren.PROGRAMM_PRAEFIX + "beverage_espresso"
+STARK = installieren.ENUM_PRAEFIX + "bean_amount_strong"
+# Konrad meldet 33 Getränke – ohne die beiden Cold-Brew-Programme neuerer Modelle.
+KONRAD_PROGRAMME = [installieren.PROGRAMM_PRAEFIX + k for k in list(installieren.GETRAENKE_NAMEN)[:33]]
+BOHNENMENGEN = [f"{installieren.ENUM_PRAEFIX}bean_amount_{endung}" for _, endung in installieren.STAERKEN]
+
+
+class Konrad:
+    """Der Zustand der Kaffeemaschine hinter ihren Home-Connect-Entitäten.
+
+    ``fernstart``: ob die Maschine Fernstart erlaubt. ``programme_erst_wenn_an``:
+    die Getränkeliste ist erst bekannt, wenn die Maschine an ist (so, als wäre sie
+    mit Home Assistant noch nie an gewesen).
+    """
+
+    def __init__(self, fernstart: bool = True, programme_erst_wenn_an: bool = False) -> None:
+        self.an = False
+        self.laeuft = False
+        self.gewaehlt: str | None = None
+        self.aktiv: str | None = None
+        self.fernstart = fernstart
+        self.programme_erst_wenn_an = programme_erst_wenn_an
+        self.aufrufe: list[tuple[str, dict[str, Any]]] = []  # Aufrufe der Dienste home_connect.*
+        self.entitaeten: list[Entity] = []  # die gerade in Home Assistant geladenen
+
+    @property
+    def programme(self) -> list[str]:
+        return [] if self.programme_erst_wenn_an and not self.an else KONRAD_PROGRAMME
+
+    def aktualisieren(self) -> None:
+        for entitaet in list(self.entitaeten):
+            entitaet.async_write_ha_state()
+
+
+class KonradEntitaet(Entity):
+    """Gemeinsames aller Entitäten der nachgebildeten Kaffeemaschine: Gerät, Name, translation_key."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(self, konrad: Konrad, name: str, schluessel: str) -> None:
+        self.konrad = konrad
+        self.schluessel = schluessel
+        self._attr_name = name
+        self._attr_translation_key = schluessel
+        self._attr_unique_id = f"Kaffeevollautomat-{schluessel}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(HOME_CONNECT, "Kaffeevollautomat")},
+            name="Kaffeevollautomat",
+            manufacturer="SIEMENS",
+            model="TQ903D03",
+        )
+
+    async def async_added_to_hass(self) -> None:
+        self.konrad.entitaeten.append(self)
+
+    async def async_will_remove_from_hass(self) -> None:
+        self.konrad.entitaeten.remove(self)
+
+
+class KonradSchalter(KonradEntitaet, SwitchEntity):
+    """Einschalter, Kindersicherung, Tassenwärmer und die Option „Mehrere Getränke“."""
+
+    def __init__(self, konrad: Konrad, name: str, schluessel: str) -> None:
+        super().__init__(konrad, name, schluessel)
+        self._an = False
+
+    @property
+    def is_on(self) -> bool:
+        return self.konrad.an if self.schluessel == "power" else self._an
+
+    @property
+    def available(self) -> bool:
+        return self.konrad.an if self.schluessel == "multiple_beverages" else True
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        if self.schluessel == "power":
+            self.konrad.an = True
+        else:
+            self._an = True
+        self.konrad.aktualisieren()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        if self.schluessel == "power":
+            self.konrad.an = False
+            self.konrad.laeuft = False
+        else:
+            self._an = False
+        self.konrad.aktualisieren()
+
+
+class KonradAuswahl(KonradEntitaet, SelectEntity):
+    """Aktives/ausgewähltes Programm und die Optionen mit Auswahlwerten (Bohnenmenge …)."""
+
+    def __init__(self, konrad: Konrad, name: str, schluessel: str, optionen: list[str] | None = None) -> None:
+        super().__init__(konrad, name, schluessel)
+        self._optionen = optionen
+        self._gewaehlt: str | None = None
+
+    @property
+    def options(self) -> list[str]:
+        return list(self._optionen) if self._optionen is not None else self.konrad.programme
+
+    @property
+    def available(self) -> bool:
+        return True if self._optionen is None else self.konrad.an  # Optionen gibt es nur bei laufender Maschine
+
+    @property
+    def current_option(self) -> str | None:
+        if self.schluessel == "active_program":
+            return self.konrad.aktiv if self.konrad.laeuft else None
+        if self.schluessel == "selected_program":
+            return self.konrad.gewaehlt
+        return self._gewaehlt
+
+    async def async_select_option(self, option: str) -> None:
+        if self.schluessel == "active_program":
+            self.konrad.aktiv, self.konrad.laeuft = option, True
+        elif self.schluessel == "selected_program":
+            self.konrad.gewaehlt = option
+        else:
+            self._gewaehlt = option
+        self.konrad.aktualisieren()
+
+
+class KonradZahl(KonradEntitaet, NumberEntity):
+    """Die Füllmenge – mit dem Bereich des ausgewählten Getränks (hier 35–300 ml)."""
+
+    _attr_native_min_value = 35
+    _attr_native_max_value = 300
+    _attr_native_step = 5
+    _attr_native_unit_of_measurement = "ml"
+    _attr_native_value = 120
+
+    @property
+    def available(self) -> bool:
+        return self.konrad.an
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._attr_native_value = value
+        self.konrad.aktualisieren()
+
+
+class KonradSensor(KonradEntitaet, SensorEntity):
+    """Betriebszustand, Fortschritt, Zähler und Wartungshinweise (letztere ab Werk deaktiviert)."""
+
+    def __init__(
+        self, konrad: Konrad, name: str, schluessel: str, wert: Any = None, deaktiviert: bool = False
+    ) -> None:
+        super().__init__(konrad, name, schluessel)
+        self._wert = wert
+        self._attr_entity_registry_enabled_default = not deaktiviert
+
+    @property
+    def native_value(self) -> Any:
+        if self.schluessel == "operation_state":
+            return "inactive" if not self.konrad.an else ("run" if self.konrad.laeuft else "ready")
+        return self._wert
+
+
+class KonradFernstart(KonradEntitaet, BinarySensorEntity):
+    @property
+    def is_on(self) -> bool:
+        return self.konrad.fernstart
+
+
+class KonradTaste(KonradEntitaet, ButtonEntity):
+    async def async_press(self) -> None:
+        self.konrad.laeuft = False
+        self.konrad.aktualisieren()
+
+
+def konrad_entitaeten(konrad: Konrad) -> dict[str, list[Entity]]:
+    """Alle Entitäten der nachgebildeten Kaffeemaschine je Plattform – mit deutschen Namen wie in Home Assistant."""
+    return {
+        "switch": [
+            KonradSchalter(konrad, "Einschalter", "power"),
+            KonradSchalter(konrad, "Kindersicherung", "child_lock"),
+            KonradSchalter(konrad, "Tassenwärmer", "cup_warmer"),
+            KonradSchalter(konrad, "Mehrere Getränke", "multiple_beverages"),
+        ],
+        "select": [
+            KonradAuswahl(konrad, "Aktives Programm", "active_program"),
+            KonradAuswahl(konrad, "Ausgewähltes Programm", "selected_program"),
+            KonradAuswahl(konrad, "Bohnenmenge", "bean_amount", BOHNENMENGEN),
+            KonradAuswahl(
+                konrad,
+                "Kaffee-Temperatur",
+                "coffee_temperature",
+                [f"{installieren.ENUM_PRAEFIX}coffee_temperature_{e}" for _, e in installieren.TEMPERATUREN],
+            ),
+            KonradAuswahl(
+                konrad,
+                "Kaffee-Milch-Verhältnis",
+                "coffee_milk_ratio",
+                [f"{installieren.ENUM_PRAEFIX}coffee_milk_ratio_{e}" for _, e in installieren.MILCHANTEILE],
+            ),
+            KonradAuswahl(
+                konrad,
+                "Durchflussrate",
+                "flow_rate",
+                [f"{installieren.ENUM_PRAEFIX}flow_rate_{e}" for _, e in installieren.INTENSITAETEN],
+            ),
+        ],
+        "number": [KonradZahl(konrad, "Füllmenge", "fill_quantity")],
+        "sensor": [
+            KonradSensor(konrad, "Betriebszustand", "operation_state"),
+            KonradSensor(konrad, "Programm-Fortschritt", "program_progress", 0),
+            KonradSensor(konrad, "Programm-Endzeit", "program_finish_time"),
+            KonradSensor(konrad, "Kaffees", "coffee_counter", 1234),
+            KonradSensor(konrad, "Wassertank leer", "water_tank_empty", "off", deaktiviert=True),
+            KonradSensor(konrad, "Tropfschale voll", "drip_tray_full", "off", deaktiviert=True),
+        ],
+        "binary_sensor": [KonradFernstart(konrad, "Fernstart", "remote_start")],
+        "button": [KonradTaste(konrad, "Programm stoppen", "stop_program")],
+    }
+
+
+def konrad_dienste(hass: HomeAssistant, konrad: Konrad) -> None:
+    """Die Dienste home_connect.set_program_and_options und start_selected_program – sie merken sich ihre Aufrufe."""
+
+    async def programm_setzen(call: ServiceCall) -> None:
+        konrad.aufrufe.append(("set_program_and_options", dict(call.data)))
+        if call.data.get("affects_to") == "selected_program":
+            konrad.gewaehlt = call.data["program"]
+        else:
+            konrad.aktiv, konrad.laeuft = call.data["program"], True
+        konrad.aktualisieren()
+
+    async def starten(call: ServiceCall) -> None:
+        konrad.aufrufe.append(("start_selected_program", dict(call.data)))
+        konrad.aktiv, konrad.laeuft = konrad.gewaehlt, True
+        konrad.aktualisieren()
+
+    hass.services.async_register(HOME_CONNECT, "set_program_and_options", programm_setzen)
+    hass.services.async_register(HOME_CONNECT, "start_selected_program", starten)
+
+
+@pytest.fixture
+async def konrad(home_assistant: HomeAssistant, home_connect: HomeConnectEinrichten) -> Konrad:
+    """Die Kaffeemaschine mit allen Entitäten der Home-Connect-Integration, ausgeschaltet."""
+    maschine = Konrad()
+    await home_connect({**KAFFEEVOLLAUTOMAT, **GESCHIRRSPUELER_GERAET}, konrad=maschine)
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"
+    assert home_assistant.states.get(AKTIV).attributes["options"] == KONRAD_PROGRAMME
+    assert home_assistant.states.get(WASSERTANK) is None  # ab Werk deaktiviert
+    return maschine
+
+
+@contextmanager
+def schnell() -> Iterator[None]:
+    """Keine Wartepausen im Skript und im Ablauf – die Nachbildung antwortet sofort."""
+    with (
+        patch.object(installieren, "OPTIONEN_PAUSE", 0),
+        patch.object(installieren, "VORBEREITUNG_PAUSE", 0),
+        sofort_neuladen(),
+    ):
+        yield
+
+
+async def dashboard_einrichten(
+    hass: HomeAssistant, client: TestClient, capsys: pytest.CaptureFixture[str], token: str, *argv: str
+) -> tuple[int, str, str]:
+    """Führt installieren.py --getraenke aus."""
+    with schnell():
+        return await skript(hass, client, capsys, "--token", token, "--getraenke", *argv)
+
+
+async def ws_befehl(hass_ws_client: WebSocketGenerator, hass: HomeAssistant, **nachricht: Any) -> Any:
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, **nachricht})
+    antwort = await ws.receive_json()
+    assert antwort["success"], antwort
+    return antwort["result"]
+
+
+def geraete_id(hass: HomeAssistant) -> str:
+    """Die Geräte-ID der Kaffeemaschine, wie home_connect.set_program_and_options sie braucht."""
+    eintrag = er.async_get(hass).async_get(KAFFEEMASCHINE)
+    assert eintrag is not None and eintrag.device_id
+    return eintrag.device_id
+
+
+async def dienst(hass: HomeAssistant, domain: str, name: str, **daten: Any) -> None:
+    await hass.services.async_call(domain, name, daten, blocking=True)
+    await hass.async_block_till_done()
+
+
+async def zusammenstellen(hass: HomeAssistant, getraenk: str, staerke: str, menge: float, doppelt: bool) -> None:
+    """Wie auf dem Dashboard: Getränk, Stärke, Menge und Doppelt einstellen."""
+    await dienst(hass, "input_select", "select_option", entity_id=GETRAENK, option=getraenk)
+    await dienst(hass, "input_select", "select_option", entity_id=STAERKE, option=staerke)
+    await dienst(hass, "input_number", "set_value", entity_id=MENGE, value=menge)
+    await dienst(hass, "input_boolean", "turn_on" if doppelt else "turn_off", entity_id=DOPPELT)
+
+
+async def test_dashboard_wird_angelegt_und_bereitet_zu(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--getraenke legt Helfer, Skripte und das Dashboard an; „Jetzt zubereiten“ schaltet ein, wählt, stellt ein, startet."""
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens,Nicole"
+    )
+    assert code == 0, fehler
+    assert f"✓ Kaffeemaschine: {KAFFEEMASCHINE}" in ausgabe
+    assert "✓ Kaffeemaschine „Kaffeevollautomat“: 19 Entitäten, davon 16 fürs Dashboard" in ausgabe
+    assert f"✓ 2 Wartungshinweise/Zähler aktiviert: {WASSERTANK.replace('wassertank_leer', 'tropfschale_voll')}, {WASSERTANK}" in ausgabe
+    assert "✓ 33 Getränke, 3 Wartungshinweise und Zähler" in ausgabe
+    assert "✓ 19 Helfer angelegt bzw. aktualisiert" in ausgabe
+    assert "✓ 3 Skripte angelegt bzw. aktualisiert: script.kaffee_zubereiten, script.lieblingsgetraenk_speichern, script.lieblingsgetraenk_zubereiten" in ausgabe
+    assert "✓ Dashboard „Kaffeevollautomat“ angelegt: http://" in ausgabe
+    assert "/kaffee-konrad" in ausgabe
+    assert "3 Plätzen für Jens, 3 Plätzen für Nicole" in ausgabe
+    assert "ist wieder ausgeschaltet" not in ausgabe  # die Maschine war aus und blieb aus
+
+    # Helfer
+    getraenk = home_assistant.states.get(GETRAENK)
+    assert getraenk.attributes["options"][:3] == ["Espresso", "Espresso Doppio", "Kaffee"]
+    assert len(getraenk.attributes["options"]) == 33
+    assert home_assistant.states.get(STAERKE).attributes["options"][:2] == [installieren.WIE_MASCHINE, "sehr mild"]
+    assert home_assistant.states.get("input_select.kaffee_temperatur").attributes["options"][1] == "88 °C"
+    assert home_assistant.states.get("input_select.kaffee_milchanteil").attributes["options"][-1] == "90 %"
+    assert home_assistant.states.get("input_select.kaffee_intensitat").attributes["options"] == [
+        installieren.WIE_MASCHINE, "Normal", "Intensiv", "Intensiv+"
+    ]
+    assert home_assistant.states.get("input_select.kaffee_bohnenbehalter") is None  # hat Konrad nicht
+    assert home_assistant.states.get(MENGE).attributes["max"] == 500
+    assert home_assistant.states.get(DOPPELT).state == "off"
+    assert home_assistant.states.get(JENS_1).state == installieren.PLATZ_FREI
+    assert home_assistant.states.get(JENS_1_DATEN).state == "unknown"  # noch nichts gespeichert
+    assert home_assistant.states.get("input_text.lieblingsgetrank_nicole_3").state == installieren.PLATZ_FREI
+    assert home_assistant.states.get("input_text.lieblingsgetrank_nicole_4") is None
+    # Wartungshinweise sind jetzt aktiv
+    assert er.async_get(home_assistant).async_get(WASSERTANK).disabled_by is None
+    assert home_assistant.states.get(WASSERTANK).state == "off"
+
+    # Skripte
+    for kennung in (installieren.SKRIPT_ZUBEREITEN, installieren.SKRIPT_SPEICHERN, installieren.SKRIPT_LIEBLING):
+        assert home_assistant.states.get(f"script.{kennung}").state == "off", kennung
+    gespeichert = yaml.safe_load(Path(home_assistant.config.path("scripts.yaml")).read_text(encoding="utf-8"))
+    assert set(gespeichert) == {installieren.SKRIPT_ZUBEREITEN, installieren.SKRIPT_SPEICHERN, installieren.SKRIPT_LIEBLING}
+    zubereiten = gespeichert[installieren.SKRIPT_ZUBEREITEN]
+    assert zubereiten["fields"]["getraenk"]["selector"]["select"]["options"][5] == "Cappuccino"
+    assert "platz" not in zubereiten["fields"]
+    assert zubereiten["sequence"][-1] == {
+        "action": "home_connect.start_selected_program",
+        "data": {"device_id": geraete_id(home_assistant)},
+    }
+
+    # Dashboard
+    [dashboard] = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/dashboards/list")
+    assert dashboard["url_path"] == installieren.DASHBOARD_URL
+    assert dashboard["title"] == "Kaffeevollautomat"
+    assert dashboard["icon"] == "mdi:coffee"
+    assert dashboard["show_in_sidebar"] is True
+    config = await ws_befehl(hass_ws_client, home_assistant, type="lovelace/config", url_path=installieren.DASHBOARD_URL)
+    [ansicht] = config["views"]
+    assert ansicht["type"] == "sections"
+    ueberschriften = [abschnitt["cards"][0]["heading"] for abschnitt in ansicht["sections"]]
+    assert ueberschriften == ["Jens", "Nicole", "Getränk zusammenstellen", "Kaffeevollautomat", "Wartung", "Zähler"]
+    jens = ansicht["sections"][0]["cards"]
+    assert [karte["entity"] for karte in jens[1:4]] == [JENS_1, "input_text.lieblingsgetrank_jens_2", "input_text.lieblingsgetrank_jens_3"]
+    assert jens[1]["tap_action"]["perform_action"] == "script.lieblingsgetraenk_zubereiten"
+    assert jens[1]["tap_action"]["data"] == {"platz": "jens_1"}
+    assert jens[1]["hold_action"]["perform_action"] == "script.lieblingsgetraenk_speichern"
+    direkt = ansicht["sections"][3]["cards"]
+    assert direkt[1]["entity"] == KAFFEEMASCHINE
+    assert {karte.get("entity") for karte in direkt} >= {AKTIV, GEWAEHLT, BOHNENMENGE, FUELLMENGE, MEHRERE_GETRAENKE,
+                                                          "switch.kaffeevollautomat_kindersicherung",
+                                                          "switch.kaffeevollautomat_tassenwarmer",
+                                                          "sensor.kaffeevollautomat_betriebszustand",
+                                                          "sensor.kaffeevollautomat_programm_fortschritt"}
+    wartung = ansicht["sections"][4]["cards"]
+    assert [(karte["entity"], karte["name"]) for karte in wartung[1:]] == [
+        (WASSERTANK.replace("wassertank_leer", "tropfschale_voll"), "Tropfschale voll"),
+        (WASSERTANK, "Wassertank leer"),
+    ]
+    assert ansicht["sections"][5]["cards"][1] == {
+        "type": "tile", "entity": "sensor.kaffeevollautomat_kaffees", "name": "Kaffees", "icon": "mdi:counter", "color": "brown",
+    }
+    assert [badge["entity"] for badge in ansicht["badges"]] == [
+        "sensor.kaffeevollautomat_betriebszustand", KAFFEEMASCHINE,
+        WASSERTANK.replace("wassertank_leer", "tropfschale_voll"), WASSERTANK,
+    ]
+
+    # „Jetzt zubereiten“: Cappuccino, stark, 500 ml (mehr als die Maschine zulässt), doppelt – Maschine ist aus.
+    await zusammenstellen(home_assistant, "Cappuccino", "stark", 500, True)
+    await dienst(home_assistant, "script", installieren.SKRIPT_ZUBEREITEN)
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "on"
+    assert konrad.aufrufe[0][0] == "set_program_and_options"
+    assert konrad.aufrufe[0][1]["affects_to"] == "selected_program"
+    assert konrad.aufrufe[0][1]["program"] == CAPPUCCINO
+    assert konrad.aufrufe[-1][0] == "start_selected_program"
+    assert len(konrad.aufrufe) == 2
+    assert home_assistant.states.get(GEWAEHLT).state == CAPPUCCINO
+    assert home_assistant.states.get(BOHNENMENGE).state == STARK
+    assert float(home_assistant.states.get(FUELLMENGE).state) == 300  # auf das Maximum des Getränks begrenzt
+    assert home_assistant.states.get(MEHRERE_GETRAENKE).state == "on"
+    assert home_assistant.states.get("select.kaffeevollautomat_kaffee_temperatur").state == "unknown"  # „wie an der Maschine“
+    assert konrad.laeuft and konrad.aktiv == CAPPUCCINO
+    assert home_assistant.states.get("sensor.kaffeevollautomat_betriebszustand").state == "run"
+
+
+async def test_lieblingsgetraenk_speichern_und_zubereiten(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Gedrückt halten speichert die Zusammenstellung auf einem Platz, Tippen bereitet genau sie zu."""
+    code, _, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, "--personen", "Jens,Nicole")
+    assert code == 0, fehler
+    await zusammenstellen(home_assistant, "Cappuccino", "stark", 180, True)
+    await dienst(home_assistant, "script", installieren.SKRIPT_SPEICHERN, platz="jens_1")
+    assert home_assistant.states.get(JENS_1).state == "Cappuccino · stark · 180 ml · doppelt"
+    daten = json.loads(home_assistant.states.get(JENS_1_DATEN).state)
+    assert daten == {
+        "g": "Cappuccino", "m": 180, "d": True, "s": "stark",
+        "t": installieren.WIE_MASCHINE, "mi": installieren.WIE_MASCHINE, "i": installieren.WIE_MASCHINE,
+        "b": installieren.WIE_MASCHINE, "h": installieren.WIE_MASCHINE,
+    }
+    assert len(home_assistant.states.get(JENS_1_DATEN).state) < 255
+
+    # Das Dashboard steht inzwischen auf etwas anderem – der Platz gewinnt.
+    await zusammenstellen(home_assistant, "Espresso", "mild", 0, False)
+    await dienst(home_assistant, "script", installieren.SKRIPT_LIEBLING, platz="jens_1")
+    assert [name for name, _ in konrad.aufrufe] == ["set_program_and_options", "start_selected_program"]
+    assert konrad.aufrufe[0][1]["program"] == CAPPUCCINO
+    assert home_assistant.states.get(BOHNENMENGE).state == STARK
+    assert float(home_assistant.states.get(FUELLMENGE).state) == 180
+    assert home_assistant.states.get(MEHRERE_GETRAENKE).state == "on"
+
+    # Ein leerer Platz brüht nichts, sondern erklärt sich.
+    konrad.aufrufe.clear()
+    await dienst(home_assistant, "script", installieren.SKRIPT_LIEBLING, platz="nicole_2")
+    assert konrad.aufrufe == []
+    [hinweis] = await ws_befehl(hass_ws_client, home_assistant, type="persistent_notification/get")
+    assert hinweis["title"] == "Kaffeemaschine"
+    assert "noch kein Getränk gespeichert" in hinweis["message"]
+
+    # Ohne Doppelt wird „Mehrere Getränke“ wieder ausgeschaltet, 0 ml lässt die Füllmenge in Ruhe.
+    await zusammenstellen(home_assistant, "Espresso", "mild", 0, False)
+    await dienst(home_assistant, "script", installieren.SKRIPT_ZUBEREITEN)
+    assert konrad.aufrufe[0][1]["program"] == ESPRESSO
+    assert home_assistant.states.get(MEHRERE_GETRAENKE).state == "off"
+    assert float(home_assistant.states.get(FUELLMENGE).state) == 180
+    assert home_assistant.states.get(BOHNENMENGE).state == installieren.ENUM_PRAEFIX + "bean_amount_mild"
+
+
+async def test_zweiter_aufruf_laesst_lieblingsgetraenke_stehen(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    konrad: Konrad,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ein zweiter Lauf aktualisiert Helfer, Skripte und Dashboard, ohne gespeicherte Plätze oder Doppeltes anzulegen."""
+    code, _, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, "--personen", "Jens,Nicole")
+    assert code == 0, fehler
+    await dienst(home_assistant, "input_text", "set_value", entity_id=JENS_1, value="Mein Kaffee")
+    await dienst(home_assistant, "input_text", "set_value", entity_id=JENS_1_DATEN, value='{"g": "Kaffee"}')
+
+    code, ausgabe, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, "--personen", "Jens,Nicole")
+    assert code == 0, fehler
+    assert "✓ Dashboard „Kaffeevollautomat“ aktualisiert" in ausgabe
+    assert "Wartungshinweise/Zähler aktiviert" not in ausgabe  # die sind es schon
+    assert home_assistant.states.get(JENS_1).state == "Mein Kaffee"
+    assert home_assistant.states.get(JENS_1_DATEN).state == '{"g": "Kaffee"}'
+    assert len(await ws_befehl(hass_ws_client, home_assistant, type="input_select/list")) == 5
+    assert len(await ws_befehl(hass_ws_client, home_assistant, type="input_text/list")) == 12
+    assert len(await ws_befehl(hass_ws_client, home_assistant, type="lovelace/dashboards/list")) == 1
+
+
+async def test_fernstart_nicht_erlaubt(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verbietet die Maschine den Fernstart, erklärt das Skript das, statt ins Leere zu laufen."""
+    konrad = Konrad(fernstart=False)
+    await home_connect({**KAFFEEVOLLAUTOMAT, **GESCHIRRSPUELER_GERAET}, konrad=konrad)
+    code, _, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, "--personen", "Jens")
+    assert code == 0, fehler
+    await dienst(home_assistant, "script", installieren.SKRIPT_ZUBEREITEN)
+    assert konrad.aufrufe == []
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"
+    [hinweis] = await ws_befehl(hass_ws_client, home_assistant, type="persistent_notification/get")
+    assert "Fernstart ist an der Maschine nicht erlaubt" in hinweis["message"]
+
+
+async def test_maschine_aus_wird_vorbereitet(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Kennt Home Assistant die Getränke noch nicht, schaltet das Skript die Maschine kurz ein und wählt Cappuccino."""
+    konrad = Konrad(programme_erst_wenn_an=True)
+    await home_connect({**KAFFEEVOLLAUTOMAT, **GESCHIRRSPUELER_GERAET}, konrad=konrad)
+    assert home_assistant.states.get(AKTIV).attributes["options"] == []
+    with patch.object(sys.stdin, "isatty", return_value=True), patch("builtins.input", side_effect=[""]):
+        code, ausgabe, fehler = await dashboard_einrichten(
+            home_assistant, client, capsys, hass_access_token, "--personen", "Jens,Nicole"
+        )
+    assert code == 0, fehler
+    assert "Home Assistant kennt noch nicht alle Getränke und Optionen der Maschine." in ausgabe
+    assert "Die Kaffeemaschine wird eingeschaltet …" in ausgabe
+    assert "„Cappuccino“ wird ausgewählt (nicht gestartet)" in ausgabe
+    assert "✓ 33 Getränke" in ausgabe
+    assert "✓ Die Kaffeemaschine ist wieder ausgeschaltet." in ausgabe
+    assert konrad.aufrufe == [
+        ("set_program_and_options", {"device_id": geraete_id(home_assistant), "affects_to": "selected_program", "program": CAPPUCCINO})
+    ]
+    assert home_assistant.states.get(KAFFEEMASCHINE).state == "off"
+    assert len(home_assistant.states.get(GETRAENK).attributes["options"]) == 33
+
+
+async def test_getraenke_ohne_terminal_und_ohne_getraenkeliste(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    home_connect: HomeConnectEinrichten,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    konrad = Konrad(programme_erst_wenn_an=True)
+    await home_connect({**KAFFEEVOLLAUTOMAT, **GESCHIRRSPUELER_GERAET}, konrad=konrad)
+    code, _, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, "--personen", "Jens")
+    assert code == 1
+    assert "Bitte die Maschine einschalten und das Skript im Terminal erneut ausführen." in fehler
+    assert home_assistant.states.get(GETRAENK) is None
+
+
+@pytest.mark.usefixtures("konrad")
+@pytest.mark.parametrize(
+    ("personen", "meldung"),
+    [
+        ([], "Für wen sollen Lieblingsgetränke angelegt werden? Zum Beispiel: --personen Jens,Nicole"),
+        (["--personen", "Jens,Nicole,Anna,Ben,Carla"], "Höchstens 4 Personen"),
+        (["--personen", "Jens,jens"], "müssen aus Buchstaben bestehen und sich unterscheiden"),
+        (["--personen", "???"], "müssen aus Buchstaben bestehen und sich unterscheiden"),
+    ],
+)
+async def test_personen_werden_geprueft(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+    personen: list[str],
+    meldung: str,
+) -> None:
+    code, _, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, *personen)
+    assert code == 1
+    assert meldung in fehler
+    assert home_assistant.states.get(GETRAENK) is None
+
+
+@pytest.mark.usefixtures("konrad")
+async def test_personen_werden_im_terminal_erfragt(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch.object(sys.stdin, "isatty", return_value=True), patch("builtins.input", side_effect=["Jens, Nicole"]):
+        code, ausgabe, fehler = await dashboard_einrichten(home_assistant, client, capsys, hass_access_token, "--plaetze", "1")
+    assert code == 0, fehler
+    assert "1 Plätzen für Jens, 1 Plätzen für Nicole" in ausgabe
+    assert home_assistant.states.get("input_text.lieblingsgetrank_nicole_1") is not None
+    assert home_assistant.states.get("input_text.lieblingsgetrank_nicole_2") is None
+
+
+@pytest.mark.parametrize("eingabe", ["0", "6", "drei"])
+def test_ungueltige_plaetze(eingabe: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        installieren.anzahl_plaetze(eingabe)
+
+
+@pytest.mark.usefixtures("konrad")
+async def test_nur_anzeigen_mit_getraenke(
+    home_assistant: HomeAssistant,
+    client: TestClient,
+    hass_access_token: str,
+    hass_ws_client: WebSocketGenerator,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, ausgabe, fehler = await dashboard_einrichten(
+        home_assistant, client, capsys, hass_access_token, "--personen", "Jens,Nicole", "--nur-anzeigen"
+    )
+    assert code == 0, fehler
+    assert "Diese Skripte würden angelegt (nichts geändert):" in ausgabe
+    assert '"alias": "Kaffee zubereiten"' in ausgabe
+    assert f'"entity": "{JENS_1}"' in ausgabe
+    assert home_assistant.states.get(GETRAENK) is None
+    assert home_assistant.states.get(WASSERTANK) is None
+    assert home_assistant.states.get(f"script.{installieren.SKRIPT_ZUBEREITEN}") is None
+    assert await ws_befehl(hass_ws_client, home_assistant, type="lovelace/dashboards/list") == []
+
+
+def test_dashboard_und_skripte_wie_die_yaml_varianten() -> None:
+    """beispiele/kaffee_dashboard.yaml und kaffee_skripte.yaml sind genau das, was das Skript anlegt."""
+    beispiel = installieren.beispiel_konfigurationen()
+    assert yaml.safe_load(KAFFEE_DASHBOARD.read_text(encoding="utf-8")) == beispiel["dashboard"]
+    assert yaml.safe_load(KAFFEE_SKRIPTE.read_text(encoding="utf-8")) == beispiel["skripte"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Kaffee: Getränk", "Kaffee: Stärke", "Kaffee: Heißwasser-Temperatur", "Kaffee: Intensität",
+        "Lieblingsgetränk Jens 1 Daten", "Lieblingsgetränk Nicole 3", "Café au Lait", "Galão", "  Jens  ",
+    ],
+)
+def test_slug_wie_home_assistant(name: str) -> None:
+    assert installieren.slug(name) == slugify(name)
+
+
+def test_getraenke_liste() -> None:
+    zustaende = {
+        AKTIV: {"attributes": {"options": [CAPPUCCINO, ESPRESSO, installieren.PROGRAMM_PRAEFIX + "cleaning_modes_rinse",
+                                           installieren.PROGRAMM_PRAEFIX + "beverage_new_fancy_drink"]}}
+    }
+    assert installieren.getraenke_liste(zustaende, AKTIV) == [
+        ("Cappuccino", CAPPUCCINO), ("Espresso", ESPRESSO),
+        ("New Fancy Drink", installieren.PROGRAMM_PRAEFIX + "beverage_new_fancy_drink"),
+    ]
+    # Ohne Getränkeliste gilt die bekannte Liste.
+    assert len(installieren.getraenke_liste({}, AKTIV)) == len(installieren.GETRAENKE_NAMEN)
+    assert installieren.getraenke_liste({}, None)[0] == ("Espresso", ESPRESSO)
